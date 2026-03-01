@@ -38,6 +38,26 @@ cp .env.example .env
 | `APP_ENV` | Entorno de ejecución (`development` / `production`) |
 | `APP_PORT` | Puerto del servidor (default: `8000`) |
 
+## Migraciones de base de datos (Alembic)
+
+El esquema de base de datos está gestionado con **Alembic** + **SQLAlchemy**. Los modelos viven en `src/infrastructure/database/models/`.
+
+```bash
+# Aplicar todas las migraciones pendientes (primera vez o después de un pull)
+uv run alembic upgrade head
+
+# Ver el estado actual de las migraciones
+uv run alembic current
+
+# Crear una nueva migración automáticamente al modificar un modelo
+uv run alembic revision --autogenerate -m "descripcion_del_cambio"
+
+# Revertir la última migración
+uv run alembic downgrade -1
+```
+
+> **Requisito:** El archivo `.env` debe existir con `SUPABASE_DB_URL` apuntando a la **conexión directa** de Supabase (puerto `5432`, no el pooler en `6543`).
+
 ## Arrancar el servidor
 
 ```bash
@@ -54,12 +74,19 @@ uv run uvicorn main:app --reload --port 8000
 ivr-tester-api/
 ├── main.py                        # Entry point de Uvicorn
 ├── pyproject.toml                 # Dependencias y configuración
+├── alembic.ini                    # Configuración de Alembic
 ├── .env.example                   # Variables de entorno de ejemplo
+├── alembic/
+│   ├── env.py                     # Configuración de conexión y metadata
+│   └── versions/                  # Archivos de migración versionados
 ├── src/
 │   ├── domain/                    # Entidades y contratos (interfaces)
 │   ├── application/               # Casos de uso y servicios
 │   ├── infrastructure/            # Adaptadores externos (DB, Twilio, Deepgram)
-│   │   └── config.py              # Configuración centralizada (pydantic-settings)
+│   │   ├── config.py              # Configuración centralizada (pydantic-settings)
+│   │   └── database/
+│   │       ├── base.py            # DeclarativeBase compartida
+│   │       └── models/            # Modelos SQLAlchemy (una entidad por archivo)
 │   └── presentation/              # API REST (routers FastAPI)
 │       └── api/v1/
 │           └── health.py          # GET /api/v1/health
