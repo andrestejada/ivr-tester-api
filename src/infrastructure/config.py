@@ -16,14 +16,15 @@ class Settings(BaseSettings):
     supabase_url: str
     supabase_key: str
     supabase_db_url: str
+    supabase_jwt_secret: str
 
-    # Twilio
-    twilio_account_sid: str
-    twilio_auth_token: str
-    twilio_phone_number: str
+    # Twilio (optional - for future integration)
+    twilio_account_sid: str = "placeholder"
+    twilio_auth_token: str = "placeholder"
+    twilio_phone_number: str = "placeholder"
 
-    # Deepgram
-    deepgram_api_key: str
+    # Deepgram (optional - for future integration)
+    deepgram_api_key: str = "placeholder"
 
 
 settings = Settings()

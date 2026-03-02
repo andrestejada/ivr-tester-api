@@ -26,17 +26,17 @@ cp .env.example .env
 # Editar .env con los valores reales de Supabase, Twilio y Deepgram
 ```
 
-| Variable | Descripción |
-|---|---|
-| `SUPABASE_URL` | URL del proyecto en Supabase |
-| `SUPABASE_KEY` | Clave anon o service role de Supabase |
-| `SUPABASE_DB_URL` | Cadena de conexión PostgreSQL de Supabase |
-| `TWILIO_ACCOUNT_SID` | Account SID de Twilio |
-| `TWILIO_AUTH_TOKEN` | Auth Token de Twilio |
-| `TWILIO_PHONE_NUMBER` | Número de teléfono comprado en Twilio |
-| `DEEPGRAM_API_KEY` | API Key de Deepgram |
-| `APP_ENV` | Entorno de ejecución (`development` / `production`) |
-| `APP_PORT` | Puerto del servidor (default: `8000`) |
+| Variable              | Descripción                                         |
+| --------------------- | --------------------------------------------------- |
+| `SUPABASE_URL`        | URL del proyecto en Supabase                        |
+| `SUPABASE_KEY`        | Clave anon o service role de Supabase               |
+| `SUPABASE_DB_URL`     | Cadena de conexión PostgreSQL de Supabase           |
+| `TWILIO_ACCOUNT_SID`  | Account SID de Twilio                               |
+| `TWILIO_AUTH_TOKEN`   | Auth Token de Twilio                                |
+| `TWILIO_PHONE_NUMBER` | Número de teléfono comprado en Twilio               |
+| `DEEPGRAM_API_KEY`    | API Key de Deepgram                                 |
+| `APP_ENV`             | Entorno de ejecución (`development` / `production`) |
+| `APP_PORT`            | Puerto del servidor (default: `8000`)               |
 
 ## Migraciones de base de datos (Alembic)
 
@@ -68,30 +68,62 @@ uv run uvicorn main:app --reload --port 8000
 - Documentación interactiva (Swagger): `http://localhost:8000/docs`
 - Health check: `GET http://localhost:8000/api/v1/health`
 
+## Tests Automatizados
+
+### Ejecutar todos los tests
+
+```bash
+# Ejecutar todos los tests con reporte detallado
+uv run pytest tests/ -v
+
+# Ejecutar todos los tests en modo quiet (resumen)
+uv run pytest tests/ -q
+
+# Ejecutar con cobertura
+uv run pytest tests/ --cov=src
+```
+
+### Ejecutar tests específicos
+
+```bash
+# Solo tests unitarios de JWT
+uv run pytest tests/test_auth_jwt.py -v
+
+# Solo tests de endpoints
+uv run pytest tests/test_auth_endpoints.py -v
+
+# Test específico
+uv run pytest tests/test_auth_jwt.py::TestVerifySupabaseToken::test_valid_token -v
+```
+
+```
+
 ## Estructura del proyecto
 
 ```
+
 ivr-tester-api/
-├── main.py                        # Entry point de Uvicorn
-├── pyproject.toml                 # Dependencias y configuración
-├── alembic.ini                    # Configuración de Alembic
-├── .env.example                   # Variables de entorno de ejemplo
+├── main.py # Entry point de Uvicorn
+├── pyproject.toml # Dependencias y configuración
+├── alembic.ini # Configuración de Alembic
+├── .env.example # Variables de entorno de ejemplo
 ├── alembic/
-│   ├── env.py                     # Configuración de conexión y metadata
-│   └── versions/                  # Archivos de migración versionados
+│ ├── env.py # Configuración de conexión y metadata
+│ └── versions/ # Archivos de migración versionados
 ├── src/
-│   ├── domain/                    # Entidades y contratos (interfaces)
-│   ├── application/               # Casos de uso y servicios
-│   ├── infrastructure/            # Adaptadores externos (DB, Twilio, Deepgram)
-│   │   ├── config.py              # Configuración centralizada (pydantic-settings)
-│   │   └── database/
-│   │       ├── base.py            # DeclarativeBase compartida
-│   │       └── models/            # Modelos SQLAlchemy (una entidad por archivo)
-│   └── presentation/              # API REST (routers FastAPI)
-│       └── api/v1/
-│           └── health.py          # GET /api/v1/health
-└── tests/                         # Pruebas automatizadas
-```
+│ ├── domain/ # Entidades y contratos (interfaces)
+│ ├── application/ # Casos de uso y servicios
+│ ├── infrastructure/ # Adaptadores externos (DB, Twilio, Deepgram)
+│ │ ├── config.py # Configuración centralizada (pydantic-settings)
+│ │ └── database/
+│ │ ├── base.py # DeclarativeBase compartida
+│ │ └── models/ # Modelos SQLAlchemy (una entidad por archivo)
+│ └── presentation/ # API REST (routers FastAPI)
+│ └── api/v1/
+│ └── health.py # GET /api/v1/health
+└── tests/ # Pruebas automatizadas
+
+````
 
 ## Comandos útiles
 
@@ -104,4 +136,4 @@ uv run ruff check src/ main.py --fix
 
 # Formatear código
 uv run ruff format src/ main.py
-```
+````
