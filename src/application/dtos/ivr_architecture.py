@@ -1,0 +1,14 @@
+from datetime import datetime
+from uuid import UUID
+
+from pydantic import BaseModel
+
+
+class IVRArchitectureResponse(BaseModel):
+    id: UUID
+    name: str
+    phone_number: str
+    description: str | None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}

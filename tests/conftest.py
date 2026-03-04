@@ -2,6 +2,7 @@
 
 import json
 from datetime import datetime, timedelta, timezone
+from uuid import uuid4
 
 import jwt
 import pytest
@@ -27,11 +28,12 @@ def test_client(test_app):
 @pytest.fixture
 def valid_token():
     """Create a valid JWT token for testing."""
+    test_user_id = str(uuid4())
     payload = {
-        "sub": "test-user-id-123",
+        "sub": test_user_id,
         "email": "test@example.com",
         "user_metadata": {"name": "Test User"},
-        "aud": "authenticated",  # Required by Supabase
+        "aud": "authenticated",
         "exp": datetime.now(timezone.utc) + timedelta(hours=1),
         "iat": datetime.now(timezone.utc),
     }
@@ -46,12 +48,13 @@ def valid_token():
 @pytest.fixture
 def expired_token():
     """Create an expired JWT token for testing."""
+    test_user_id = str(uuid4())
     payload = {
-        "sub": "test-user-id-123",
+        "sub": test_user_id,
         "email": "test@example.com",
         "user_metadata": {"name": "Test User"},
-        "aud": "authenticated",  # Required by Supabase
-        "exp": datetime.now(timezone.utc) - timedelta(hours=1),  # Expired 1 hour ago
+        "aud": "authenticated",
+        "exp": datetime.now(timezone.utc) - timedelta(hours=1),
         "iat": datetime.now(timezone.utc) - timedelta(hours=2),
     }
     token = jwt.encode(
@@ -71,15 +74,15 @@ def malformed_token():
 @pytest.fixture
 def wrong_signature_token():
     """Create a JWT token with wrong signature for testing."""
+    test_user_id = str(uuid4())
     payload = {
-        "sub": "test-user-id-123",
+        "sub": test_user_id,
         "email": "test@example.com",
         "user_metadata": {"name": "Test User"},
-        "aud": "authenticated",  # Required by Supabase
+        "aud": "authenticated",
         "exp": datetime.now(timezone.utc) + timedelta(hours=1),
         "iat": datetime.now(timezone.utc),
     }
-    # Sign with wrong secret
     token = jwt.encode(
         payload,
         "wrong-secret-key",

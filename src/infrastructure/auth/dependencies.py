@@ -1,6 +1,7 @@
 """FastAPI dependency injection for JWT authentication."""
 
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -48,8 +49,17 @@ async def get_current_user(
     token = credentials.credentials
 
     try:
-        # Verify and decode token
         user = verify_supabase_token(token)
+        
+        try:
+            user["id"] = UUID(user.get("id"))
+        except (ValueError, TypeError):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token inválido o expirado",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        
         return user
 
     except ExpiredTokenError:
