@@ -14,3 +14,5 @@ wheels/
 
 # Ruff cache
 .ruff_cache/
+
+copilot-instructions.md
