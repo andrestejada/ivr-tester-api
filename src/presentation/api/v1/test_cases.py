@@ -7,7 +7,10 @@ from fastapi import APIRouter, Depends, status
 
 from src.infrastructure.auth.dependencies import get_current_user
 from src.presentation.api.v1.schemas.test_case import CreateTestCaseRequest
-from src.application.use_cases import CreateTestCaseUseCase, ListTestCasesUseCase
+from src.application.use_cases import (
+    CreateTestCaseUseCase,
+    ListTestCasesUseCase,
+)
 from src.application.dtos import TestCaseResponse
 from src.presentation.dependencies import (
     get_create_test_case_use_case,
@@ -46,3 +49,5 @@ async def list_test_cases(
 ):
     """Lista todos los Test Cases de una arquitectura IVR."""
     return await use_case.execute(ivr_architecture_id=ivr_architecture_id)
+
+

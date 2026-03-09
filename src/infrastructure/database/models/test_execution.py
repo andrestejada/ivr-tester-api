@@ -45,10 +45,11 @@ class TestExecutionModel(Base):
         nullable=False,
     )
     duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    twilio_call_sid: Mapped[str | None] = mapped_column(
+    # agnostic identifier for the call from whichever voice provider was used
+    provider_call_sid: Mapped[str | None] = mapped_column(
         String(64),
         nullable=True,
-        comment="Twilio CallSid for cross-referencing in Twilio Console",
+        comment="CallSid returned by the voice provider (Twilio, Vonage, etc.)",
     )
     executed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
