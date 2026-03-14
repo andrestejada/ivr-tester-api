@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     # App
     app_env: str = "development"
     app_port: int = 8000
+    base_url: str  # Requerida en .env (ej: http://localhost:8000, ngrok tunnel en dev, https://api.example.com en prod)
 
     # Supabase
     supabase_url: str
@@ -18,7 +19,7 @@ class Settings(BaseSettings):
     supabase_db_url: str
     supabase_jwt_secret: str
 
-    # Twilio (optional - for future integration)
+    # Twilio
     twilio_account_sid: str = "placeholder"
     twilio_auth_token: str = "placeholder"
     twilio_phone_number: str = "placeholder"

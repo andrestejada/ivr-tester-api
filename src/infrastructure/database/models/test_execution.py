@@ -17,6 +17,7 @@ class TestStatus(str, enum.Enum):
     Maps to the PostgreSQL ENUM type 'test_status' created in the migration.
     """
 
+    RUNNING = "RUNNING"
     PASSED = "PASSED"
     FAILED = "FAILED"
     ERROR = "ERROR"

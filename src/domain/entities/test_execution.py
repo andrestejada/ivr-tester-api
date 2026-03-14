@@ -20,5 +20,5 @@ class TestExecutionEntity:
         # basic invariants
         if self.duration_seconds is not None and self.duration_seconds < 0:
             raise ValueError("duration_seconds no puede ser negativo")
-        if self.status not in ("PASSED", "FAILED", "ERROR"):
+        if self.status not in ("RUNNING", "PASSED", "FAILED", "ERROR"):
             raise ValueError("status inválido para TestExecutionEntity")

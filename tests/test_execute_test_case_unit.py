@@ -1,0 +1,328 @@
+"""Unit tests for ExecuteTestCaseUseCase."""
+
+import asyncio
+import pytest
+from datetime import datetime, timezone
+from decimal import Decimal
+from unittest.mock import AsyncMock, MagicMock
+from uuid import uuid4
+
+from src.application.use_cases.execute_test_case_use_case import ExecuteTestCaseUseCase
+from src.domain.entities.execution_log import ExecutionLogEntity
+from src.domain.entities.test_case import TestCaseEntity
+from src.domain.entities.test_execution import TestExecutionEntity
+from src.domain.entities.call_session import CallSessionEntity
+from src.infrastructure.call_session_store import CallSessionStore
+
+
+@pytest.fixture
+def mock_test_case_repo():
+    """Mock test case repository."""
+    repo = AsyncMock()
+    return repo
+
+
+@pytest.fixture
+def mock_test_execution_repo():
+    """Mock test execution repository."""
+    repo = AsyncMock()
+    return repo
+
+
+@pytest.fixture
+def mock_execution_log_repo():
+    """Mock execution log repository."""
+    repo = AsyncMock()
+    return repo
+
+
+@pytest.fixture
+def mock_call_provider():
+    """Mock call provider."""
+    provider = AsyncMock()
+    return provider
+
+
+@pytest.fixture
+def mock_asr_provider():
+    """Mock ASR provider."""
+    provider = AsyncMock()
+    return provider
+
+
+@pytest.fixture
+def mock_call_session_store():
+    """Mock call session store."""
+    store = AsyncMock()
+    return store
+
+
+@pytest.fixture
+def use_case(
+    mock_test_case_repo,
+    mock_test_execution_repo,
+    mock_execution_log_repo,
+    mock_call_provider,
+    mock_asr_provider,
+    mock_call_session_store,
+):
+    """Create use case with mocked dependencies."""
+    return ExecuteTestCaseUseCase(
+        test_case_repo=mock_test_case_repo,
+        test_execution_repo=mock_test_execution_repo,
+        execution_log_repo=mock_execution_log_repo,
+        call_provider=mock_call_provider,
+        asr_provider=mock_asr_provider,
+        call_session_store=mock_call_session_store,
+    )
+
+
+class TestExecuteTestCaseUseCase:
+    """Test cases for ExecuteTestCaseUseCase."""
+
+    @pytest.mark.asyncio
+    async def test_execute_happy_path(
+        self,
+        use_case,
+        mock_test_case_repo,
+        mock_test_execution_repo,
+        mock_execution_log_repo,
+        mock_call_provider,
+        mock_asr_provider,
+        mock_call_session_store,
+    ):
+        """Test successful execution with matching transcriptions."""
+        # Setup
+        test_case_id = uuid4()
+        phone_number = "+1234567890"
+        webhook_url = "http://localhost:8000/webhooks/twilio/voice"
+
+        # Mock test case
+        flow_script = [
+            {"step": 1, "listen": "Bienvenido", "action": "1"},
+            {"step": 2, "listen": "Gracias", "action": None},
+        ]
+        test_case = TestCaseEntity(
+            id=test_case_id,
+            ivr_architecture_id=uuid4(),
+            name="Test Case",
+            flow_script=flow_script,
+            created_at=datetime.now(timezone.utc),
+        )
+        mock_test_case_repo.get_by_id.return_value = test_case
+
+        # Mock execution creation
+        execution = TestExecutionEntity(
+            id=uuid4(),
+            test_case_id=test_case_id,
+            status="RUNNING",
+            duration_seconds=None,
+            provider_call_sid=None,
+            executed_at=datetime.now(timezone.utc),
+        )
+        mock_test_execution_repo.create.return_value = execution
+
+        # Mock call session returned by initiate_call
+        call_session = CallSessionEntity(
+            call_sid="CA123456789",
+            started_at=datetime.now(timezone.utc),
+            is_active=True,
+        )
+        mock_call_provider.initiate_call.return_value = call_session
+
+        # Mock audio dequeue (simulate audio received)
+        mock_call_session_store.dequeue_audio.side_effect = [
+            b"audio_data_1",  # First step
+            b"audio_data_2",  # Second step
+        ]
+
+        # Mock transcription (exact matches)
+        mock_asr_provider.transcribe.side_effect = [
+            "Bienvenido",  # Matches first step
+            "Gracias",     # Matches second step
+        ]
+
+        # Mock execution update
+        final_execution = TestExecutionEntity(
+            id=execution.id,
+            test_case_id=test_case_id,
+            status="PASSED",
+            duration_seconds=5.0,
+            provider_call_sid="CA123456789",
+            executed_at=datetime.now(timezone.utc),
+        )
+        mock_test_execution_repo.update_status.return_value = final_execution
+
+        # Mock hangup
+        mock_call_provider.hangup.return_value = None
+
+        # Execute
+        result = await use_case.execute(test_case_id, phone_number, webhook_url)
+
+        # Assertions
+        assert result.status == "PASSED"
+        assert result.duration_seconds == 5.0
+
+        # Verify call initiation
+        mock_call_provider.initiate_call.assert_called_once_with(
+            phone_number=phone_number,
+            webhook_url=webhook_url,
+        )
+
+        # Verify transcriptions
+        assert mock_asr_provider.transcribe.call_count == 2
+
+        # Verify DTMF sent for first step
+        mock_call_provider.send_dtmf.assert_called_once_with(
+            call_sid="CA123456789",
+            digits="1",
+        )
+
+        # Verify execution logs created
+        assert mock_execution_log_repo.create.call_count == 2
+
+        # Verify hangup
+        mock_call_provider.hangup.assert_called_once_with("CA123456789")
+
+    @pytest.mark.asyncio
+    async def test_execute_transcription_mismatch(
+        self,
+        use_case,
+        mock_test_case_repo,
+        mock_test_execution_repo,
+        mock_call_provider,
+        mock_asr_provider,
+        mock_call_session_store,
+    ):
+        """Test execution fails when transcription doesn't match expected text."""
+        # Setup
+        test_case_id = uuid4()
+        phone_number = "+1234567890"
+        webhook_url = "http://localhost:8000/webhooks/twilio/voice"
+
+        # Mock test case with one step
+        flow_script = [{"step": 1, "listen": "Bienvenido", "action": "1"}]
+        test_case = TestCaseEntity(
+            id=test_case_id,
+            ivr_architecture_id=uuid4(),
+            name="Test Case",
+            flow_script=flow_script,
+            created_at=datetime.now(timezone.utc),
+        )
+        mock_test_case_repo.get_by_id.return_value = test_case
+
+        # Mock execution
+        execution = TestExecutionEntity(
+            id=uuid4(),
+            test_case_id=test_case_id,
+            status="RUNNING",
+            duration_seconds=None,
+            provider_call_sid=None,
+            executed_at=datetime.now(timezone.utc),
+        )
+        mock_test_execution_repo.create.return_value = execution
+        
+        # Mock call session
+        call_session = CallSessionEntity(
+            call_sid="CA123456789",
+            started_at=datetime.now(timezone.utc),
+            is_active=True,
+        )
+        mock_call_provider.initiate_call.return_value = call_session
+
+        # Mock audio received
+        mock_call_session_store.dequeue_audio.return_value = b"audio_data"
+
+        # Mock transcription (doesn't match)
+        mock_asr_provider.transcribe.return_value = "Hola"  # Expected "Bienvenido"
+
+        # Mock execution update to FAILED
+        failed_execution = TestExecutionEntity(
+            id=execution.id,
+            test_case_id=test_case_id,
+            status="FAILED",
+            duration_seconds=3.0,
+            provider_call_sid="CA123456789",
+            executed_at=datetime.now(timezone.utc),
+        )
+        mock_test_execution_repo.update_status.return_value = failed_execution
+
+        # Execute
+        result = await use_case.execute(test_case_id, phone_number, webhook_url)
+
+        # Assertions
+        assert result.status == "FAILED"
+
+        # Verify no DTMF sent (because transcription didn't match)
+        mock_call_provider.send_dtmf.assert_not_called()
+
+        # Verify hangup still called
+        mock_call_provider.hangup.assert_called_once_with("CA123456789")
+
+    @pytest.mark.asyncio
+    async def test_execute_audio_timeout(
+        self,
+        use_case,
+        mock_test_case_repo,
+        mock_test_execution_repo,
+        mock_call_provider,
+        mock_call_session_store,
+    ):
+        """Test execution fails when no audio is received within timeout."""
+        # Setup
+        test_case_id = uuid4()
+        phone_number = "+1234567890"
+        webhook_url = "http://localhost:8000/webhooks/twilio/voice"
+
+        # Mock test case
+        flow_script = [{"step": 1, "listen": "Bienvenido", "action": "1"}]
+        test_case = TestCaseEntity(
+            id=test_case_id,
+            ivr_architecture_id=uuid4(),
+            name="Test Case",
+            flow_script=flow_script,
+            created_at=datetime.now(timezone.utc),
+        )
+        mock_test_case_repo.get_by_id.return_value = test_case
+
+        # Mock execution
+        execution = TestExecutionEntity(
+            id=uuid4(),
+            test_case_id=test_case_id,
+            status="RUNNING",
+            duration_seconds=None,
+            provider_call_sid=None,
+            executed_at=datetime.now(timezone.utc),
+        )
+        mock_test_execution_repo.create.return_value = execution
+        
+        # Mock call session
+        call_session = CallSessionEntity(
+            call_sid="CA123456789",
+            started_at=datetime.now(timezone.utc),
+            is_active=True,
+        )
+        mock_call_provider.initiate_call.return_value = call_session
+
+        # Mock timeout (no audio received)
+        mock_call_session_store.dequeue_audio.side_effect = asyncio.TimeoutError()
+
+        # Mock execution update to ERROR
+        error_execution = TestExecutionEntity(
+            id=execution.id,
+            test_case_id=test_case_id,
+            status="ERROR",
+            duration_seconds=10.0,
+            provider_call_sid="CA123456789",
+            executed_at=datetime.now(timezone.utc),
+        )
+        mock_test_execution_repo.update_status.return_value = error_execution
+
+        # Execute
+        result = await use_case.execute(test_case_id, phone_number, webhook_url)
+
+        # Assertions
+        assert result.status == "ERROR"
+
+        # Verify hangup still called
+        mock_call_provider.hangup.assert_called_once_with("CA123456789")

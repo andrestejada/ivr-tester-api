@@ -8,6 +8,7 @@ class IVRArchitectureResponse(BaseModel):
     id: UUID
     name: str
     phone_number: str
+    provider: str
     description: str | None
     created_at: datetime
 

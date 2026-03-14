@@ -12,6 +12,7 @@ class IVRArchitectureEntity:
     phone_number: str
     user_id: UUID
     created_at: datetime
+    provider: str = "twilio"  # Provider agnóstico: "twilio", "vonage", etc.
     updated_at: datetime | None = None
     description: str | None = None
 
@@ -20,3 +21,5 @@ class IVRArchitectureEntity:
             raise ValueError("El nombre debe tener entre 1 y 250 caracteres")
         if not self.phone_number.isdigit():
             raise ValueError("El teléfono debe contener solo números")
+        if not self.provider:
+            raise ValueError("El provider no puede estar vacío")

@@ -30,6 +30,10 @@ class IVRArchitectureModel(Base):
     )
     name: Mapped[str] = mapped_column(VARCHAR(255), nullable=False)
     phone_number: Mapped[str] = mapped_column(VARCHAR(50), nullable=False)
+    provider: Mapped[str] = mapped_column(
+        VARCHAR(50), nullable=False, default="twilio",
+        comment="Provider agnóstico (twilio, vonage, etc.)"
+    )
     description: Mapped[str | None] = mapped_column(TEXT, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
