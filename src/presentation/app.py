@@ -18,7 +18,11 @@ def create_app() -> FastAPI:
         version="0.1.0",
     )
 
+    # ── Exception Handlers ───────────────────────────────────────────────────
+    register_exception_handlers(app)
+
     # ── CORS ─────────────────────────────────────────────────────────────────
+    # IMPORTANT: CORS middleware MUST be added last to ensure it wraps all responses
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://localhost:3000"],  # frontend dev
@@ -26,9 +30,6 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
-
-    # ── Exception Handlers ───────────────────────────────────────────────────
-    register_exception_handlers(app)
 
     # ── Routers ───────────────────────────────────────────────────────────────
     app.include_router(health_router, prefix="/api/v1")

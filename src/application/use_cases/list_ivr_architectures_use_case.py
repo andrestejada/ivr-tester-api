@@ -19,6 +19,7 @@ class ListIVRArchitecturesUseCase:
                 name=arch.name,
                 phone_number=arch.phone_number,
                 description=arch.description,
+                provider=arch.provider,
                 created_at=arch.created_at,
             )
             for arch in architectures
