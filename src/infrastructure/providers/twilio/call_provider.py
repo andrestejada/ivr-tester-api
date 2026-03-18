@@ -77,6 +77,8 @@ class TwilioCallProvider(ICallProvider):
             Exception si la llamada no existe o ya terminó
         """
         try:
+            from twilio.twiml.voice_response import VoiceResponse, Play, Start, Stream, Pause
+            
             logger.info(f"Sending DTMF {digits} to call {call_sid}")
             
             # Extraer dominio para formar la URL segura del WebSocket (wss)
@@ -84,21 +86,24 @@ class TwilioCallProvider(ICallProvider):
             scheme = "wss" if "https" in settings.base_url else "ws"
             ws_url = f"{scheme}://{domain}/ws/call/{call_sid}"
             
-            # Construir el TwiML:
+            # Construir el TwiML de forma segura usando el SDK oficial:
+            response = VoiceResponse()
+            
             # 1. <Play digits="ww{digits}">: los 'ww' agregan 1 segundo de pausa antes de marcar
+            response.play(digits=f"ww{digits}")
+            
             # 2. <Start><Stream ...>: reabre la conexión WebSocket
+            start = Start()
+            start.stream(name="ivr_stream", url=ws_url, track="inbound_track")
+            response.append(start)
+            
             # 3. <Pause length="60"/>: mantiene la llamada transcurriendo
-            twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-    <Play digits="ww{digits}"/>
-    <Start>
-        <Stream name="ivr_stream" url="{ws_url}" track="inbound_track"/>
-    </Start>
-    <Pause length="60"/>
-</Response>"""
+            response.pause(length=60)
+
+            twiml_string = str(response)
 
             # Realiza la modificación de la llamada en tiempo real a través de la API REST
-            self.client.calls(call_sid).update(twiml=twiml)
+            self.client.calls(call_sid).update(twiml=twiml_string)
             logger.info(f"Successfully sent DTMF {digits} and reopened stream for {call_sid}")
             
         except Exception as e:
