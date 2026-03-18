@@ -8,12 +8,14 @@ dependencies = [
     "alembic>=1.18.4",
     "asyncpg>=0.31.0",
     "cryptography>=41.0.0",
+    "deepgram-sdk>=3.0.0",
     "fastapi[standard]>=0.134.0",
     "httpx>=0.25.0",
     "psycopg2-binary>=2.9.11",
     "pydantic-settings>=2.13.1",
     "pyjwt>=2.8.0",
     "sqlalchemy>=2.0.47",
+    "tenacity>=8.2.3",
     "twilio>=9.0.0",
 ]
 

@@ -24,8 +24,8 @@ class Settings(BaseSettings):
     twilio_auth_token: str = "placeholder"
     twilio_phone_number: str = "placeholder"
 
-    # Deepgram (optional - for future integration)
-    deepgram_api_key: str = "placeholder"
+    # Deepgram (ASR streaming)
+    deepgram_api_key: str  # Requerida para habilitar el adaptador ASR en tiempo real
 
 
 settings = Settings()

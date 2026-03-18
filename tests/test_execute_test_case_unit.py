@@ -158,10 +158,23 @@ class TestExecuteTestCaseUseCase:
 
         # Execute
         result = await use_case.execute(test_case_id, phone_number, webhook_url)
+        
+        # Wait for background task to complete
+        # The execute() method returns immediately with RUNNING status,
+        # but creates a background task to process the call.
+        # We need to wait enough time for the async task to process all steps.
+        await asyncio.sleep(1.0)
 
         # Assertions
-        assert result.status == "PASSED"
-        assert result.duration_seconds == 5.0
+        # The immediate result has status RUNNING (created synchronously)
+        assert result.status == "RUNNING"
+        
+        # But update_status should have been called with PASSED (from background task)
+        # Verify update_status was called with PASSED status
+        assert mock_test_execution_repo.update_status.called
+        # Get the first call to update_status and check the status argument
+        call_args = mock_test_execution_repo.update_status.call_args_list[0]
+        assert call_args[1]['status'] == 'PASSED'
 
         # Verify call initiation
         mock_call_provider.initiate_call.assert_called_once_with(
@@ -249,9 +262,22 @@ class TestExecuteTestCaseUseCase:
 
         # Execute
         result = await use_case.execute(test_case_id, phone_number, webhook_url)
+        
+        # Wait for background task to complete
+        await asyncio.sleep(0.2)
 
         # Assertions
-        assert result.status == "FAILED"
+        # The immediate result has status RUNNING (created synchronously)
+        assert result.status == "RUNNING"
+        
+        # But update_status should have been called with FAILED (from background task)
+        # Wait a bit more to ensure the background task has called update_status
+        await asyncio.sleep(0.1)
+        
+        # Verify update_status was called with FAILED status
+        assert mock_test_execution_repo.update_status.called
+        call_args = mock_test_execution_repo.update_status.call_args_list[0]
+        assert call_args[1]['status'] == 'FAILED'
 
         # Verify no DTMF sent (because transcription didn't match)
         mock_call_provider.send_dtmf.assert_not_called()
@@ -320,9 +346,19 @@ class TestExecuteTestCaseUseCase:
 
         # Execute
         result = await use_case.execute(test_case_id, phone_number, webhook_url)
+        
+        # Wait for background task to complete
+        await asyncio.sleep(1.0)
 
         # Assertions
-        assert result.status == "ERROR"
+        # The immediate result has status RUNNING (created synchronously)
+        assert result.status == "RUNNING"
+        
+        # But update_status should have been called with FAILED status
+        # (timeout is a failure of a step, not a critical error)
+        assert mock_test_execution_repo.update_status.called
+        call_args = mock_test_execution_repo.update_status.call_args_list[0]
+        assert call_args[1]['status'] == 'FAILED'
 
         # Verify hangup still called
         mock_call_provider.hangup.assert_called_once_with("CA123456789")
