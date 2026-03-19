@@ -5,6 +5,7 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
+from src.application.exceptions import NotFoundError
 from src.domain.repositories.test_case_repository import ITestCaseRepository
 from src.domain.entities.test_case import TestCaseEntity
 from src.infrastructure.database.models.test_case import TestCaseModel
@@ -51,14 +52,14 @@ class TestCaseRepository(ITestCaseRepository):
         )
         model = result.scalars().first()
         if not model:
-            raise ValueError(f"Test Case {test_case_id} not found")
+            raise NotFoundError(f"Test Case {test_case_id} not found")
         return self._to_entity(model)
 
     async def delete(self, test_case_id: UUID) -> None:
         """Elimina un Test Case."""
         model = await self.session.get(TestCaseModel, test_case_id)
         if not model:
-            raise ValueError(f"Test Case {test_case_id} not found")
+            raise NotFoundError(f"Test Case {test_case_id} not found")
         await self.session.delete(model)
 
     @staticmethod

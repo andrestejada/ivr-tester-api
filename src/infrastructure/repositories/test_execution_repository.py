@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
+from src.application.exceptions import NotFoundError
 from src.domain.repositories.test_execution_repository import ITestExecutionRepository
 from src.domain.entities.test_execution import TestExecutionEntity
 from src.infrastructure.database.models.test_execution import TestExecutionModel, TestStatus
@@ -67,7 +68,7 @@ class TestExecutionRepository(ITestExecutionRepository):
         )
         model = result.scalars().first()
         if not model:
-            raise ValueError(f"Test execution {execution_id} not found")
+            raise NotFoundError(f"Test execution {execution_id} not found")
         return self._to_entity(model)
 
     async def update_status(
@@ -88,7 +89,7 @@ class TestExecutionRepository(ITestExecutionRepository):
         )
         model = result.scalars().first()
         if not model:
-            raise ValueError(f"Test execution {execution_id} not found")
+            raise NotFoundError(f"Test execution {execution_id} not found")
         
         model.status = TestStatus(status)
         if duration_seconds is not None:

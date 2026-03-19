@@ -9,9 +9,13 @@ from src.presentation.api.v1.test_executions import router as test_executions_ro
 from src.presentation.api.v1.webhooks.twilio_voice import router as twilio_webhook_router
 from src.presentation.api.v1.websockets.call_stream import router as call_stream_router
 from src.presentation.exception_handlers import register_exception_handlers
+from src.infrastructure.logger import setup_logger
 
 
 def create_app() -> FastAPI:
+    # Setup central logger
+    setup_logger()
+
     app = FastAPI(
         title="IVR Tester API",
         description="Motor de orquestación de pruebas automatizadas para IVRs.",

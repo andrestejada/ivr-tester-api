@@ -2,6 +2,7 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
+from src.application.exceptions import NotFoundError
 from src.domain.repositories.ivr_architecture_repository import (
     IIVRArchitectureRepository,
 )
@@ -38,7 +39,7 @@ class IVRArchitectureRepository(IIVRArchitectureRepository):
         )
         model = result.scalars().first()
         if not model:
-            raise ValueError(f"IVR Architecture {architecture_id} not found")
+            raise NotFoundError(f"IVR Architecture {architecture_id} not found")
         return self._to_entity(model)
 
     async def list_by_user(self, user_id: UUID) -> list[IVRArchitectureEntity]:
@@ -51,7 +52,7 @@ class IVRArchitectureRepository(IIVRArchitectureRepository):
     async def delete(self, architecture_id: UUID) -> None:
         model = await self.session.get(IVRArchitectureModel, architecture_id)
         if not model:
-            raise ValueError(f"IVR Architecture {architecture_id} not found")
+            raise NotFoundError(f"IVR Architecture {architecture_id} not found")
         await self.session.delete(model)
 
     @staticmethod
