@@ -1,12 +1,12 @@
 """Twilio implementation of ICallProvider."""
 
-import logging
 from typing import Optional
 
 from src.domain.ports.call_provider import ICallProvider, CallSession
 from src.infrastructure.config import settings
+from src.infrastructure.logger import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class TwilioCallProvider(ICallProvider):

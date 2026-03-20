@@ -20,9 +20,9 @@ class Settings(BaseSettings):
     supabase_jwt_secret: str
 
     # Twilio
-    twilio_account_sid: str = "placeholder"
-    twilio_auth_token: str = "placeholder"
-    twilio_phone_number: str = "placeholder"
+    twilio_account_sid: str
+    twilio_auth_token: str
+    twilio_phone_number: str
 
     # Deepgram (ASR streaming)
     deepgram_api_key: str  # Requerida para habilitar el adaptador ASR en tiempo real

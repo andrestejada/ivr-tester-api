@@ -1,12 +1,12 @@
 """Use case para ejecutar un test case — orquestación de llamadas y pasos."""
 
 import asyncio
-import logging
 from datetime import datetime, timezone
 from decimal import Decimal
 from difflib import SequenceMatcher
 from time import time
 from uuid import UUID
+from typing import Callable
 
 from src.domain.entities.execution_log import ExecutionLogEntity
 from src.domain.entities.test_case import TestCaseEntity
@@ -17,8 +17,10 @@ from src.domain.repositories.execution_log_repository import IExecutionLogReposi
 from src.domain.repositories.test_case_repository import ITestCaseRepository
 from src.domain.repositories.test_execution_repository import ITestExecutionRepository
 from src.infrastructure.call_session_store import CallSessionStore
+from src.infrastructure.database.uow import UnitOfWork
+from src.infrastructure.logger import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # Constantes
 AUDIO_TIMEOUT_SECONDS = 10.0
@@ -36,6 +38,7 @@ class ExecuteTestCaseUseCase:
         call_provider: ICallProvider,
         asr_provider: IASRProvider,
         call_session_store: CallSessionStore,
+        uow_factory: Callable[[], UnitOfWork] | None = None,
     ) -> None:
         """Inicializa el use case con dependencias.
         
@@ -46,6 +49,7 @@ class ExecuteTestCaseUseCase:
             call_provider: Proveedor de telefonía (Twilio)
             asr_provider: Proveedor de transcripción (Deepgram, etc)
             call_session_store: Store de sesiones activas
+            uow_factory: Factory para UnitOfWork en background
         """
         self.test_case_repo = test_case_repo
         self.test_execution_repo = test_execution_repo
@@ -53,6 +57,7 @@ class ExecuteTestCaseUseCase:
         self.call_provider = call_provider
         self.asr_provider = asr_provider
         self.call_session_store = call_session_store
+        self.uow_factory = uow_factory
 
     async def execute(
         self, test_case_id: UUID, phone_number: str, webhook_url: str
@@ -90,41 +95,48 @@ class ExecuteTestCaseUseCase:
         self, 
         execution: TestExecutionEntity, 
         test_case: TestCaseEntity, 
-        phone_number: str, 
+        phone_number: str,
         webhook_url: str
     ) -> None:
-        """Lógica principal de orquestación en background."""
+        """Lógica principal de orquestación en background con manejo de errores."""
         start_time = time()
         logger.info(f"Background processing started for execution: {execution.id}")
-        
-        try:
-            # 1. Iniciar llamada
-            call_session = await self._initiate_call(execution, phone_number, webhook_url, start_time)
-            if not call_session:
-                return  # Falló la llamada, terminamos ejecución (estado ya actualizado en el log)
-            
-            # 2. Bucle por los pasos
-            all_passed = True
-            for step_index, step in enumerate(test_case.flow_script, start=1):
-                passed = await self._process_single_step(
-                    execution_id=execution.id,
-                    call_sid=call_session.call_sid,
-                    step=step,
-                    step_index=step_index,
-                )
-                if not passed:
-                    all_passed = False
-                    break
-            
-            # 3. Finalizar ejecución y colgar llamada
-            await self._finalize_execution(execution.id, call_session.call_sid, start_time, all_passed)
-        
-        except Exception as e:
-            logger.error(f"Execution error general: {e}", exc_info=True)
-            raise
 
-    async def _initiate_call(self, execution: TestExecutionEntity, phone_number: str, webhook_url: str, start_time: float):
-        """Intenta iniciar la llamada y actualiza el estado en caso de error."""
+        if self.uow_factory is None:
+            await self._process_call_background_with_repos(
+                execution=execution,
+                test_case=test_case,
+                phone_number=phone_number,
+                webhook_url=webhook_url,
+                test_execution_repo=self.test_execution_repo,
+                execution_log_repo=self.execution_log_repo,
+                start_time=start_time,
+            )
+            return
+
+        async with self.uow_factory() as uow:
+            await self._process_call_background_with_repos(
+                execution=execution,
+                test_case=test_case,
+                phone_number=phone_number,
+                webhook_url=webhook_url,
+                test_execution_repo=uow.test_execution_repo,
+                execution_log_repo=uow.execution_log_repo,
+                start_time=start_time,
+            )
+
+    async def _process_call_background_with_repos(
+        self,
+        execution: TestExecutionEntity,
+        test_case: TestCaseEntity,
+        phone_number: str,
+        webhook_url: str,
+        test_execution_repo: ITestExecutionRepository,
+        execution_log_repo: IExecutionLogRepository,
+        start_time: float,
+    ) -> None:
+        """Procesa la orquestación con repositorios y sesión explícitos."""
+        # 1. Iniciar llamada
         try:
             call_session = await self.call_provider.initiate_call(
                 phone_number=phone_number,
@@ -132,22 +144,88 @@ class ExecuteTestCaseUseCase:
             )
             execution.provider_call_sid = call_session.call_sid
             logger.info(f"Call initiated: {call_session.call_sid}")
-            return call_session
         except Exception as e:
             logger.error(f"Error initiating call: {e}")
             duration = int(time() - start_time)
-            await self.test_execution_repo.update_status(
-                execution.id,
-                status="ERROR",
-                duration_seconds=duration,
-            )
-            return None
+            try:
+                await test_execution_repo.update_status(
+                    execution.id,
+                    status="ERROR",
+                    duration_seconds=duration,
+                )
+            except Exception as e2:
+                logger.error(
+                    f"Failed to update execution {execution.id} status to ERROR after initiate_call failure: {e2}"
+                )
+            return
 
-    async def _process_single_step(self, execution_id: UUID, call_sid: str, step: dict, step_index: int) -> bool:
+        try:
+            # 2. Bucle por los pasos
+            all_passed = True
+            for step_index, step in enumerate(test_case.flow_script, start=1):
+                try:
+                    passed = await self._process_single_step(
+                        execution_id=execution.id,
+                        call_sid=call_session.call_sid,
+                        step=step,
+                        step_index=step_index,
+                        execution_log_repo=execution_log_repo,
+                    )
+                    if not passed:
+                        all_passed = False
+                        break
+                except Exception as e:
+                    logger.error(
+                        f"Unexpected error processing step {step_index} in execution {execution.id}: {e}",
+                        exc_info=True,
+                    )
+                    await test_execution_repo.update_status(
+                        execution.id,
+                        status="ERROR",
+                        duration_seconds=int(time() - start_time),
+                    )
+                    # Intentar colgar en caso de error crítico
+                    try:
+                        await self.call_provider.hangup(call_session.call_sid)
+                    except Exception:
+                        pass
+                    return
+
+            # 3. Finalizar ejecución y colgar llamada
+            await self._finalize_execution(
+                execution.id,
+                call_session.call_sid,
+                start_time,
+                all_passed,
+                test_execution_repo=test_execution_repo,
+            )
+
+        except Exception as e:
+            logger.error(f"Execution error general: {e}", exc_info=True)
+            # Intentamos actualizar estado en caso de error no controlado
+            try:
+                await test_execution_repo.update_status(
+                    execution.id,
+                    status="ERROR",
+                    duration_seconds=int(time() - start_time),
+                )
+            except Exception as e2:
+                logger.error(f"Could not update status after background error: {e2}")
+
+    async def _process_single_step(
+        self,
+        execution_id: UUID,
+        call_sid: str,
+        step: dict,
+        step_index: int,
+        execution_log_repo: IExecutionLogRepository | None = None,
+    ) -> bool:
         """Procesa un único paso del test case (audio, transcripción, evaluación, acción y log). Retorna True si pasó."""
         step_number = step.get("step", step_index)
         expected_text = step.get("listen", "")
         action = step.get("action")
+
+        execution_log_repo = execution_log_repo or self.execution_log_repo
         
         logger.info(f"Step {step_number}: listening for '{expected_text}'")
         
@@ -155,7 +233,15 @@ class ExecuteTestCaseUseCase:
         transcription, error_msg = await self._get_transcription(call_sid, step_number)
         if error_msg:
             # Fallo en el audio o transcripción
-            await self._log_step(execution_id, step_number, expected_text, None, Decimal("0.00"), error_msg)
+            await self._log_step(
+                execution_id,
+                step_number,
+                expected_text,
+                None,
+                Decimal("0.00"),
+                error_msg,
+                execution_log_repo=execution_log_repo,
+            )
             return False
             
         # 2. Evaluar similitud del texto
@@ -163,17 +249,41 @@ class ExecuteTestCaseUseCase:
         logger.info(f"Step {step_number}: similarity={similarity:.0%} (threshold={SIMILARITY_THRESHOLD:.0%})")
         if not is_match:
             logger.warning(f"Step {step_number}: text mismatch (expected '{expected_text}', got '{transcription}')")
-            await self._log_step(execution_id, step_number, expected_text, transcription, confidence, "Failed text match")
+            await self._log_step(
+                execution_id,
+                step_number,
+                expected_text,
+                transcription,
+                confidence,
+                "Failed text match",
+                execution_log_repo=execution_log_repo,
+            )
             return False
 
         # 3. Ejecutar acción (DTMF) si aplica
         action_taken, action_error = await self._execute_action(call_sid, action, step_number)
         if action_error:
-            await self._log_step(execution_id, step_number, expected_text, transcription, confidence, action_taken)
+            await self._log_step(
+                execution_id,
+                step_number,
+                expected_text,
+                transcription,
+                confidence,
+                action_taken,
+                execution_log_repo=execution_log_repo,
+            )
             return False
 
         # 4. Guardar log exitoso
-        await self._log_step(execution_id, step_number, expected_text, transcription, confidence, action_taken)
+        await self._log_step(
+            execution_id,
+            step_number,
+            expected_text,
+            transcription,
+            confidence,
+            action_taken,
+            execution_log_repo=execution_log_repo,
+        )
         return True
 
     async def _get_transcription(self, call_sid: str, step_number: int) -> tuple[str | None, str | None]:
@@ -222,10 +332,17 @@ class ExecuteTestCaseUseCase:
             return f"DTMF error: {str(e)[:255]}", True
 
     async def _log_step(
-        self, execution_id: UUID, step_number: int, expected_text: str, 
-        actual_transcription: str | None, confidence: Decimal, action_taken: str
+        self,
+        execution_id: UUID,
+        step_number: int,
+        expected_text: str,
+        actual_transcription: str | None,
+        confidence: Decimal,
+        action_taken: str,
+        execution_log_repo: IExecutionLogRepository | None = None,
     ):
         """Encapsula la creación del log en base de datos para cada paso."""
+        execution_log_repo = execution_log_repo or self.execution_log_repo
         log = ExecutionLogEntity(
             id=None,
             execution_id=execution_id,
@@ -236,14 +353,23 @@ class ExecuteTestCaseUseCase:
             action_taken=action_taken,
             created_at=datetime.now(timezone.utc),
         )
-        await self.execution_log_repo.create(log)
+        await execution_log_repo.create(log)
+        await self._commit_session(session)
 
-    async def _finalize_execution(self, execution_id: UUID, call_sid: str, start_time: float, all_passed: bool):
+    async def _finalize_execution(
+        self,
+        execution_id: UUID,
+        call_sid: str,
+        start_time: float,
+        all_passed: bool,
+        test_execution_repo: ITestExecutionRepository | None = None,
+    ):
         """Actualiza el estado final de la ejecución de prueba y cuelga la llamada."""
+        test_execution_repo = test_execution_repo or self.test_execution_repo
         duration = int(time() - start_time)
         final_status = "PASSED" if all_passed else "FAILED"
-        
-        await self.test_execution_repo.update_status(
+
+        await test_execution_repo.update_status(
             execution_id,
             status=final_status,
             duration_seconds=duration,
@@ -255,3 +381,4 @@ class ExecuteTestCaseUseCase:
             logger.info(f"Call hung up: {call_sid}")
         except Exception as e:
             logger.warning(f"Error hanging up call: {e}")
+

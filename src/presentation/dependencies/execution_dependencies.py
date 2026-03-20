@@ -8,7 +8,8 @@ from src.domain.repositories.test_case_repository import ITestCaseRepository
 from src.domain.repositories.test_execution_repository import ITestExecutionRepository
 from src.domain.repositories.execution_log_repository import IExecutionLogRepository
 from src.infrastructure.call_session_store import get_call_session_store
-from src.infrastructure.database.session import get_db_session
+from src.infrastructure.database.session import async_session_maker, get_db_session
+from src.infrastructure.database.uow import UnitOfWork
 from src.infrastructure.repositories.test_case_repository import TestCaseRepository
 from src.infrastructure.repositories.test_execution_repository import TestExecutionRepository
 from src.infrastructure.repositories.execution_log_repository import ExecutionLogRepository
@@ -53,4 +54,5 @@ async def get_execute_test_case_use_case(
         call_provider=TwilioCallProvider(),
         asr_provider=StubASRProvider(),
         call_session_store=get_call_session_store(),
+        uow_factory=lambda: UnitOfWork(async_session_maker),
     )
