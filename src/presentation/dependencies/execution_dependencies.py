@@ -14,7 +14,7 @@ from src.infrastructure.repositories.test_case_repository import TestCaseReposit
 from src.infrastructure.repositories.test_execution_repository import TestExecutionRepository
 from src.infrastructure.repositories.execution_log_repository import ExecutionLogRepository
 from src.infrastructure.providers.twilio import TwilioCallProvider
-from src.infrastructure.providers.stub_asr import StubASRProvider
+from src.infrastructure.providers.deepgram_asr_provider import DeepgramASRProvider
 
 
 async def get_test_case_repo(
@@ -45,14 +45,14 @@ async def get_execute_test_case_use_case(
 ) -> ExecuteTestCaseUseCase:
     """Inyecta el use case con todas sus dependencias.
     
-    Nota: StubASRProvider será reemplazado por Deepgram en HU-24.
+    Nota: Requiere DEEPGRAM_API_KEY en .env.
     """
     return ExecuteTestCaseUseCase(
         test_case_repo=test_case_repo,
         test_execution_repo=test_execution_repo,
         execution_log_repo=execution_log_repo,
         call_provider=TwilioCallProvider(),
-        asr_provider=StubASRProvider(),
+        asr_provider=DeepgramASRProvider(),
         call_session_store=get_call_session_store(),
         uow_factory=lambda: UnitOfWork(async_session_maker),
     )

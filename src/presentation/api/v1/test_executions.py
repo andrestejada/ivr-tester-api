@@ -1,6 +1,7 @@
 """API Router for Test Execution endpoints."""
 
 import asyncio
+import logging
 from typing import Annotated
 from uuid import UUID
 
@@ -22,6 +23,7 @@ from src.presentation.dependencies.ivr_architecture_dependencies import (
 )
 
 router = APIRouter(prefix="/ivr-architectures", tags=["test-executions"])
+logger = logging.getLogger(__name__)
 
 
 @router.get(
@@ -64,6 +66,12 @@ async def execute_test_case(
     # Construir webhook_url dinámicamente basada en el provider
     webhook_url = f"{settings.base_url}/webhooks/{architecture.provider}/voice"
     
+    logger.info(
+        "Executing test case with provider=%s webhook_url=%s",
+        architecture.provider,
+        webhook_url,
+    )
+
     # Ejecutar use case. Éste ya se encarga de crear el registro RUNNING 
     # y lanzar la tarea pesada en background (asyncio.create_task).
     execution = await use_case.execute(

@@ -54,7 +54,10 @@ async def call_stream_websocket(websocket: WebSocket, call_sid: str) -> None:
             message = json.loads(data)
             
             event = message.get("event", "unknown")
-            logger.debug(f"WebSocket event: {event} for call {call_sid}")
+            
+            # Solo registrar eventos que no sean "media" para no saturar los logs
+            if event != "media":
+                logger.debug(f"WebSocket event: {event} for call {call_sid}")
             
             # Manejar eventos
             if event == "start":
@@ -69,14 +72,9 @@ async def call_stream_websocket(websocket: WebSocket, call_sid: str) -> None:
                     payload_b64 = message.get("media", {}).get("payload", "")
                     if payload_b64:
                         audio_bytes = base64.b64decode(payload_b64)
-                        # Encolar audio
+                        # Encolar audio silenciosamente
                         enqueued = await store.enqueue_audio(call_sid, audio_bytes)
-                        if enqueued:
-                            logger.debug(
-                                f"Audio enqueued for {call_sid}: "
-                                f"{len(audio_bytes)} bytes"
-                            )
-                        else:
+                        if not enqueued:
                             logger.warning(
                                 f"Failed to enqueue audio for {call_sid}"
                             )

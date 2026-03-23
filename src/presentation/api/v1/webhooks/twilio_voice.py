@@ -1,7 +1,7 @@
 """Webhook endpoint for Twilio voice calls."""
 
 import logging
-from fastapi import APIRouter, Request, HTTPException
+from fastapi import APIRouter, Request, HTTPException, Response
 
 from src.infrastructure.providers.twilio import TwilioWebhookValidator
 from src.infrastructure.config import settings
@@ -16,7 +16,7 @@ _webhook_validator = TwilioWebhookValidator(settings.twilio_auth_token)
 
 
 @router.post("/webhooks/twilio/voice")
-async def twilio_voice_webhook(request: Request) -> dict:
+async def twilio_voice_webhook(request: Request) -> Response:
     """
     Webhook que Twilio llama cuando inicia una llamada.
     
@@ -27,6 +27,12 @@ async def twilio_voice_webhook(request: Request) -> dict:
         TwiML XML para que Twilio inicie el stream
     """
     try:
+        logger.info(
+            "Twilio webhook received: method=%s url=%s client=%s",
+            request.method,
+            str(request.url),
+            request.client,
+        )
         # Leer el cuerpo para obtener los parámetros
         form_data = await request.form()
         data_dict = dict(form_data)
@@ -34,13 +40,24 @@ async def twilio_voice_webhook(request: Request) -> dict:
         # Obtener la firma del header
         signature_header = request.headers.get("X-Twilio-Signature", "")
         
-        # Validar firma
+        # Validar firma (con bypass opcional en development)
         url = str(request.url)
-        is_valid = _webhook_validator.validate_signature(
-            url=url,
-            data=data_dict,
-            signature_header=signature_header
+        logger.debug(
+            "Twilio webhook debug: url=%s signature_present=%s form_keys=%s",
+            url,
+            bool(signature_header),
+            list(data_dict.keys()),
         )
+
+        if settings.app_env.lower() == "development":
+            is_valid = True
+            logger.warning("Twilio signature validation bypassed (development)")
+        else:
+            is_valid = _webhook_validator.validate_signature(
+                url=url,
+                data=data_dict,
+                signature_header=signature_header
+            )
         
         if not is_valid:
             logger.warning(f"Invalid Twilio signature from {request.client}")
@@ -76,7 +93,7 @@ async def twilio_voice_webhook(request: Request) -> dict:
 """
         
         logger.debug(f"Sending TwiML: {twiml}")
-        return {"twiml": twiml}
+        return Response(content=twiml, media_type="application/xml")
     
     except HTTPException:
         raise

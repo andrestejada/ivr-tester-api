@@ -7,6 +7,8 @@ from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
+from src.application.use_cases import execute_test_case_use_case as execute_module
+
 from src.application.use_cases.execute_test_case_use_case import ExecuteTestCaseUseCase
 from src.domain.entities.execution_log import ExecutionLogEntity
 from src.domain.entities.test_case import TestCaseEntity
@@ -131,16 +133,24 @@ class TestExecuteTestCaseUseCase:
         mock_call_provider.initiate_call.return_value = call_session
 
         # Mock audio dequeue (simulate audio received)
-        mock_call_session_store.dequeue_audio.side_effect = [
+        mock_call_session_store.try_dequeue_audio.side_effect = [
             b"audio_data_1",  # First step
             b"audio_data_2",  # Second step
         ]
 
-        # Mock transcription (exact matches)
-        mock_asr_provider.transcribe.side_effect = [
-            "Bienvenido",  # Matches first step
-            "Gracias",     # Matches second step
-        ]
+        # Mock streaming transcription callbacks
+        transcript_queue = ["Bienvenido", "Gracias"]
+
+        async def _set_handler(cb):
+            mock_asr_provider._cb = cb
+
+        async def _send_audio(_chunk):
+            if getattr(mock_asr_provider, "_cb", None) and transcript_queue:
+                text = transcript_queue.pop(0)
+                await mock_asr_provider._cb(text, True)
+
+        mock_asr_provider.set_transcript_handler.side_effect = _set_handler
+        mock_asr_provider.send_audio.side_effect = _send_audio
 
         # Mock execution update
         final_execution = TestExecutionEntity(
@@ -182,8 +192,8 @@ class TestExecuteTestCaseUseCase:
             webhook_url=webhook_url,
         )
 
-        # Verify transcriptions
-        assert mock_asr_provider.transcribe.call_count == 2
+        # Verify streaming transcript handler was used
+        assert mock_asr_provider.set_transcript_handler.call_count == 2
 
         # Verify DTMF sent for first step
         mock_call_provider.send_dtmf.assert_called_once_with(
@@ -244,10 +254,18 @@ class TestExecuteTestCaseUseCase:
         mock_call_provider.initiate_call.return_value = call_session
 
         # Mock audio received
-        mock_call_session_store.dequeue_audio.return_value = b"audio_data"
+        mock_call_session_store.try_dequeue_audio.return_value = b"audio_data"
 
         # Mock transcription (doesn't match)
-        mock_asr_provider.transcribe.return_value = "Hola"  # Expected "Bienvenido"
+        async def _set_handler(cb):
+            mock_asr_provider._cb = cb
+
+        async def _send_audio(_chunk):
+            if getattr(mock_asr_provider, "_cb", None):
+                await mock_asr_provider._cb("Hola", True)
+
+        mock_asr_provider.set_transcript_handler.side_effect = _set_handler
+        mock_asr_provider.send_audio.side_effect = _send_audio
 
         # Mock execution update to FAILED
         failed_execution = TestExecutionEntity(
@@ -293,6 +311,7 @@ class TestExecuteTestCaseUseCase:
         mock_test_execution_repo,
         mock_call_provider,
         mock_call_session_store,
+        monkeypatch,
     ):
         """Test execution fails when no audio is received within timeout."""
         # Setup
@@ -330,8 +349,12 @@ class TestExecuteTestCaseUseCase:
         )
         mock_call_provider.initiate_call.return_value = call_session
 
+        # Reduce timeouts for fast test
+        monkeypatch.setattr(execute_module, "AUDIO_TIMEOUT_SECONDS", 0.2)
+        monkeypatch.setattr(execute_module, "STREAM_POLL_SECONDS", 0.01)
+
         # Mock timeout (no audio received)
-        mock_call_session_store.dequeue_audio.side_effect = asyncio.TimeoutError()
+        mock_call_session_store.try_dequeue_audio.return_value = None
 
         # Mock execution update to ERROR
         error_execution = TestExecutionEntity(

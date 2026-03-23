@@ -16,6 +16,7 @@ from src.domain.ports.call_provider import ICallProvider
 from src.domain.repositories.execution_log_repository import IExecutionLogRepository
 from src.domain.repositories.test_case_repository import ITestCaseRepository
 from src.domain.repositories.test_execution_repository import ITestExecutionRepository
+from src.application.exceptions import NotFoundError
 from src.infrastructure.call_session_store import CallSessionStore
 from src.infrastructure.database.uow import UnitOfWork
 from src.infrastructure.logger import get_logger
@@ -24,6 +25,8 @@ logger = get_logger(__name__)
 
 # Constantes
 AUDIO_TIMEOUT_SECONDS = 10.0
+SILENCE_TIMEOUT_SECONDS = 3.0
+STREAM_POLL_SECONDS = 0.5
 SIMILARITY_THRESHOLD = 0.80  # 80%
 
 
@@ -68,17 +71,21 @@ class ExecuteTestCaseUseCase:
         """
         logger.info(f"Starting test case execution setup: {test_case_id}")
         
-        # 1. Crear ejecución inicial sincrónicamente para devolverla al HTTP router
+        # 1. Obtener test case
+        try:
+            test_case = await self.test_case_repo.get_by_id(test_case_id)
+        except NotFoundError:
+            logger.warning(f"Test case not found: {test_case_id}")
+            raise
+
+        # 2. Crear ejecución inicial sincrónicamente para devolverla al HTTP router
         execution = await self.test_execution_repo.create(
             test_case_id=test_case_id,
             status="RUNNING",
             provider_call_sid=None,
         )
         logger.info(f"Execution created: {execution.id}")
-        
-        # 2. Obtener test case
-        test_case = await self.test_case_repo.get_by_id(test_case_id)
-        
+
         # 3. Lanzar orquestación pesada en background
         asyncio.create_task(
             self._process_call_background(
@@ -160,7 +167,26 @@ class ExecuteTestCaseUseCase:
             return
 
         try:
-            # 2. Bucle por los pasos
+            # 2. Esperar a que la llamada se conecte (el webhook debe crear la sesión).
+            logger.info("Waiting for call to be answered and webhook to be received...")
+            wait_time = 0.0
+            max_wait_time = 45.0  # máximo 45 segundos para que contesten
+            session_active = False
+
+            while wait_time < max_wait_time:
+                # Polling corto para ver si la sesión ya fue creada por el webhook
+                if await self.call_session_store.is_session_active(call_session.call_sid):
+                    session_active = True
+                    break
+                await asyncio.sleep(1.0)
+                wait_time += 1.0
+
+            if not session_active:
+                raise TimeoutError("Call was not answered or webhook was not received in time.")
+            
+            logger.info("Call answered and session active. Beginning step execution.")
+
+            # 3. Bucle por los pasos
             all_passed = True
             for step_index, step in enumerate(test_case.flow_script, start=1):
                 try:
@@ -287,22 +313,79 @@ class ExecuteTestCaseUseCase:
         return True
 
     async def _get_transcription(self, call_sid: str, step_number: int) -> tuple[str | None, str | None]:
-        """Extrae el audio y lo transcribe. Retorna (transcripción, mensaje_de_error)."""
-        try:
-            audio_bytes = await self.call_session_store.dequeue_audio(
-                call_sid, timeout_seconds=AUDIO_TIMEOUT_SECONDS
-            )
-        except TimeoutError:
-            logger.error(f"Step {step_number}: timeout waiting for audio ({AUDIO_TIMEOUT_SECONDS}s)")
-            return None, "Timeout waiting for audio"
+        """Extrae audio en streaming y espera transcripción final.
+        
+        Retorna (transcripción, mensaje_de_error).
+        """
+        transcript_text: dict[str, str] = {"text": ""}
+        transcript_final = asyncio.Event()
+
+        async def _on_transcript(text: str, is_final: bool) -> None:
+            if text:
+                transcript_text["text"] = text
+            if is_final:
+                transcript_final.set()
 
         try:
-            transcription = await self.asr_provider.transcribe(audio_bytes)
-            logger.info(f"Step {step_number}: transcribed '{transcription}'")
-            return transcription, None
+            await self.asr_provider.connect(
+                encoding="mulaw",
+                sample_rate=8000,
+                endpointing=int(SILENCE_TIMEOUT_SECONDS * 1000),
+            )
+            await self.asr_provider.set_transcript_handler(_on_transcript)
         except Exception as e:
-            logger.error(f"Step {step_number}: transcription error: {e}")
-            return None, f"Transcription error: {str(e)[:255]}"
+            logger.error(f"Step {step_number}: ASR connect error: {e}")
+            return None, f"ASR connect error: {str(e)[:255]}"
+
+        start_time = time()
+        last_audio_time = start_time
+        got_audio = False
+
+        try:
+            while True:
+                elapsed = time() - start_time
+                if elapsed >= AUDIO_TIMEOUT_SECONDS:
+                    logger.error(
+                        f"Step {step_number}: timeout waiting for audio ({AUDIO_TIMEOUT_SECONDS}s)"
+                    )
+                    break
+
+                # Esperar un chunk corto para permitir detectar silencio
+                try:
+                    chunk = await self.call_session_store.try_dequeue_audio(
+                        call_sid, timeout_seconds=STREAM_POLL_SECONDS
+                    )
+                except ValueError as e:
+                    logger.error(f"Step {step_number}: audio queue error: {e}")
+                    return None, "Audio queue error"
+
+                if chunk:
+                    got_audio = True
+                    last_audio_time = time()
+                    await self.asr_provider.send_audio(chunk)
+
+                if transcript_final.is_set():
+                    break
+
+                # Si ya hubo audio, y pasaron N segundos sin chunks, asumimos fin del segmento
+                if got_audio and (time() - last_audio_time) >= SILENCE_TIMEOUT_SECONDS:
+                    break
+        finally:
+            try:
+                await self.asr_provider.disconnect()
+            except Exception:
+                pass
+
+        if transcript_text["text"]:
+            logger.info(
+                f"Step {step_number}: transcribed '{transcript_text['text']}'"
+            )
+            return transcript_text["text"], None
+
+        if not got_audio:
+            return None, "Timeout waiting for audio"
+
+        return None, "No transcription received"
 
     def _evaluate_transcription(self, expected_text: str, transcription: str) -> tuple[float, Decimal, bool]:
         """Compara la transcripción con el texto esperado. Retorna (similitud, confidencia_decimal, es_acierto)."""
@@ -354,7 +437,6 @@ class ExecuteTestCaseUseCase:
             created_at=datetime.now(timezone.utc),
         )
         await execution_log_repo.create(log)
-        await self._commit_session(session)
 
     async def _finalize_execution(
         self,

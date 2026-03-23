@@ -121,6 +121,31 @@ class CallSessionStore:
                 f"No audio received for call_sid {call_sid} within {timeout_seconds}s"
             )
 
+    async def try_dequeue_audio(
+        self, call_sid: str, timeout_seconds: float = 1.0
+    ) -> Optional[bytes]:
+        """Intenta dequeue de audio con timeout corto.
+        
+        Args:
+            call_sid: ID de la llamada
+            timeout_seconds: Timeout corto para esperar audio
+            
+        Returns:
+            Buffer de audio si hay datos, None si hubo timeout
+            
+        Raises:
+            ValueError si la sesión no existe
+        """
+        async with self._lock:
+            queue = self._queues.get(call_sid)
+            if not queue:
+                raise ValueError(f"No queue for call_sid: {call_sid}")
+
+        try:
+            return await asyncio.wait_for(queue.get(), timeout=timeout_seconds)
+        except asyncio.TimeoutError:
+            return None
+
     async def close_session(self, call_sid: str) -> None:
         """Cierra y limpia una sesión.
         

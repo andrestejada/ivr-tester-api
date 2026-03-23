@@ -165,7 +165,8 @@ class DeepgramASRProvider(IASRProvider):
         try:
             # Enviar chunk directamente al WebSocket de Deepgram usando nuevo método
             await self._connection.send_media(chunk)
-            logger.debug(f"📤 Enviados {len(chunk)} bytes a Deepgram")
+            # Evitamos loguear cada fragmento para no hacer spam en consola
+            pass
             
         except Exception as e:
             logger.error(f"❌ Error al enviar audio a Deepgram: {e}")
