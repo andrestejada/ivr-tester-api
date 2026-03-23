@@ -90,6 +90,20 @@ class CallSessionStore:
         await queue.put(audio_bytes)
         return True
 
+    async def clear_queue(self, call_sid: str) -> None:
+        """Limpia la cola de audio descartando los chunks pendientes."""
+        async with self._lock:
+            queue = self._queues.get(call_sid)
+            if not queue:
+                return
+            
+            # Vaciar la cola completamente
+            while not queue.empty():
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+
     async def dequeue_audio(
         self, call_sid: str, timeout_seconds: float = 10.0
     ) -> bytes:

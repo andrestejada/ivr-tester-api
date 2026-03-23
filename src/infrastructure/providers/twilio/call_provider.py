@@ -49,6 +49,7 @@ class TwilioCallProvider(ICallProvider):
             logger.info(f"Initiating call to {phone_number}")
             
             # Crear llamada via Twilio REST API
+            # Usando url webhook: Twilio descargará el TwiML cuando contesten. (Se pierden ~200-500ms).
             call = self.client.calls.create(
                 to=phone_number,
                 from_=self.from_number,
@@ -97,8 +98,8 @@ class TwilioCallProvider(ICallProvider):
             start.stream(name="ivr_stream", url=ws_url, track="inbound_track")
             response.append(start)
             
-            # 3. <Pause length="60"/>: mantiene la llamada transcurriendo
-            response.pause(length=60)
+            # 3. <Pause length="3600"/>: mantiene la llamada transcurriendo
+            response.pause(length=3600)
 
             twiml_string = str(response)
 

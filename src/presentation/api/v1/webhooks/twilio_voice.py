@@ -1,6 +1,8 @@
 """Webhook endpoint for Twilio voice calls."""
 
 import logging
+logging.getLogger("python_multipart.multipart").setLevel(logging.INFO)  # Callate multipart
+
 from fastapi import APIRouter, Request, HTTPException, Response
 
 from src.infrastructure.providers.twilio import TwilioWebhookValidator
@@ -88,7 +90,7 @@ async def twilio_voice_webhook(request: Request) -> Response:
     <Start>
         <Stream name="ivr_stream" url="{ws_url}" track="inbound_track"/>
     </Start>
-    <Pause length="60"/>
+    <Pause length="3600"/>
 </Response>
 """
         

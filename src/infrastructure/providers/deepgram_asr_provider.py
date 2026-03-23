@@ -91,6 +91,9 @@ class DeepgramASRProvider(IASRProvider):
         """
         try:
             import asyncio
+            import logging
+            logging.getLogger("websockets.client").setLevel(logging.INFO)  # Callate websockets client
+
             # Instanciar cliente de Deepgram asíncrono
             # En v6.0.1, si queremos pasar la api_key, es mediante un kwarg
             self._client = AsyncDeepgramClient(api_key=self.settings.deepgram_api_key)

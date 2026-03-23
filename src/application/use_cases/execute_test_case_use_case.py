@@ -24,8 +24,8 @@ from src.infrastructure.logger import get_logger
 logger = get_logger(__name__)
 
 # Constantes
-AUDIO_TIMEOUT_SECONDS = 10.0
-SILENCE_TIMEOUT_SECONDS = 3.0
+AUDIO_TIMEOUT_SECONDS = 30.0
+SILENCE_TIMEOUT_SECONDS = 5.0  # Damos más tiempo, 5 segundos de silencio total antes de cortar
 STREAM_POLL_SECONDS = 0.5
 SIMILARITY_THRESHOLD = 0.80  # 80%
 
@@ -317,14 +317,24 @@ class ExecuteTestCaseUseCase:
         
         Retorna (transcripción, mensaje_de_error).
         """
-        transcript_text: dict[str, str] = {"text": ""}
+        # 1. Limpiar cola de audio de cualquier chunk residual del paso anterior o DTMF
+        await self.call_session_store.clear_queue(call_sid)
+        
+        transcript_parts: list[str] = []
+        current_partial: str = ""
         transcript_final = asyncio.Event()
 
         async def _on_transcript(text: str, is_final: bool) -> None:
-            if text:
-                transcript_text["text"] = text
+            nonlocal current_partial
             if is_final:
+                if text:
+                    transcript_parts.append(text)
+                current_partial = ""
+                # Deepgram emitirá is_final=True al detectar un silencio según el endpointing
                 transcript_final.set()
+            else:
+                if text:
+                    current_partial = text
 
         try:
             await self.asr_provider.connect(
@@ -345,8 +355,8 @@ class ExecuteTestCaseUseCase:
             while True:
                 elapsed = time() - start_time
                 if elapsed >= AUDIO_TIMEOUT_SECONDS:
-                    logger.error(
-                        f"Step {step_number}: timeout waiting for audio ({AUDIO_TIMEOUT_SECONDS}s)"
+                    logger.warning(
+                        f"Step {step_number}: timeout waiting for whole audio ({AUDIO_TIMEOUT_SECONDS}s)"
                     )
                     break
 
@@ -364,11 +374,18 @@ class ExecuteTestCaseUseCase:
                     last_audio_time = time()
                     await self.asr_provider.send_audio(chunk)
 
-                if transcript_final.is_set():
+                # Si ya hubo audio, y pasaron N segundos sin chunks (esto suele significar que Twilio dejó de enviar, ej. call terminada)
+                if got_audio and (time() - last_audio_time) >= SILENCE_TIMEOUT_SECONDS + 3.0:
+                    logger.debug(f"Step {step_number}: timeout de silence absoluto, asumiendo fin de audio.")
                     break
-
-                # Si ya hubo audio, y pasaron N segundos sin chunks, asumimos fin del segmento
-                if got_audio and (time() - last_audio_time) >= SILENCE_TIMEOUT_SECONDS:
+                    
+                # Si Deepgram nos indicó que la transcripción finalizó debido a que se identificó el fin del habla (endpointing)
+                # podemos salir.
+                if transcript_final.is_set():
+                    logger.debug(f"Step {step_number}: Deepgram detectó endpointing y finalizó.")
+                    # A veces Deepgram manda is_final pero no envía instantáneamente todos los fragmentos
+                    # Agregamos una pausa micro aquí para no cortar la conexión a la mitad de otro mensaje en camino
+                    await asyncio.sleep(0.5) 
                     break
         finally:
             try:
@@ -376,11 +393,17 @@ class ExecuteTestCaseUseCase:
             except Exception:
                 pass
 
-        if transcript_text["text"]:
+        # Reconstruir texto final
+        final_text = " ".join(transcript_parts)
+        if not final_text and current_partial:
+            final_text = current_partial
+
+        if final_text:
+            final_text = final_text.strip()
             logger.info(
-                f"Step {step_number}: transcribed '{transcript_text['text']}'"
+                f"Step {step_number}: transcribed '{final_text}'"
             )
-            return transcript_text["text"], None
+            return final_text, None
 
         if not got_audio:
             return None, "Timeout waiting for audio"
