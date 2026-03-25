@@ -6,11 +6,14 @@ from uuid import UUID, uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
+from sqlalchemy.orm import selectinload
 
 from src.application.exceptions import NotFoundError
 from src.domain.repositories.test_execution_repository import ITestExecutionRepository
 from src.domain.entities.test_execution import TestExecutionEntity
 from src.infrastructure.database.models.test_execution import TestExecutionModel, TestStatus
+from src.infrastructure.database.models.test_case import TestCaseModel
+from src.infrastructure.database.models.execution_log import ExecutionLogModel
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +73,39 @@ class TestExecutionRepository(ITestExecutionRepository):
         if not model:
             raise NotFoundError(f"Test execution {execution_id} not found")
         return self._to_entity(model)
+
+    async def get_by_id_with_details(self, execution_id: UUID) -> TestExecutionModel:
+        """Obtiene una ejecución por su ID con sus relaciones precargadas para análisis forense.
+        
+        Realiza eager loading de:
+        - test_case con su relación ivr_architecture
+        - logs ordenados por step_number
+        
+        Args:
+            execution_id: ID de la ejecución
+            
+        Returns:
+            TestExecutionModel con relaciones precargadas (test_case, ivr_architecture, logs)
+            
+        Raises:
+            NotFoundError: Si no existe la ejecución
+        """
+        result = await self.session.execute(
+            select(TestExecutionModel)
+            .where(TestExecutionModel.id == execution_id)
+            .options(
+                selectinload(TestExecutionModel.test_case).selectinload(
+                    TestCaseModel.ivr_architecture
+                ),
+                selectinload(TestExecutionModel.logs),
+            )
+        )
+        model = result.scalars().first()
+        if not model:
+            raise NotFoundError(f"Test execution {execution_id} not found")
+        
+        logger.info(f"Retrieved execution details: {execution_id}")
+        return model
 
     async def update_status(
         self, execution_id: UUID, status: str, duration_seconds: int | None = None

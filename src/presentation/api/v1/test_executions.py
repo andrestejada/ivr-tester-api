@@ -9,14 +9,23 @@ from fastapi import APIRouter, Depends, status
 
 from src.infrastructure.auth.dependencies import get_current_user
 from src.infrastructure.config import settings
-from src.application.use_cases import ListTestExecutionsUseCase
+from src.application.use_cases import (
+    ListTestExecutionsUseCase,
+    GetTestExecutionDetailsUseCase,
+)
 from src.application.use_cases.execute_test_case_use_case import ExecuteTestCaseUseCase
-from src.application.dtos import TestExecutionResponse
+from src.application.dtos import (
+    TestExecutionResponse,
+    TestExecutionDetailsResponse,
+)
 from src.application.dtos.test_execution import ExecuteTestCaseRequest
 from src.domain.repositories.ivr_architecture_repository import IIVRArchitectureRepository
 from src.presentation.dependencies import get_list_test_executions_use_case
 from src.presentation.dependencies.execution_dependencies import (
     get_execute_test_case_use_case,
+)
+from src.presentation.dependencies.test_execution_dependencies import (
+    get_test_execution_details_use_case,
 )
 from src.presentation.dependencies.ivr_architecture_dependencies import (
     get_ivr_architecture_repo,
@@ -88,3 +97,35 @@ async def execute_test_case(
         provider_call_sid=execution.provider_call_sid,
         executed_at=execution.executed_at,
     )
+
+
+@router.get(
+    "/{ivr_architecture_id}/test-cases/{test_case_id}/executions/{execution_id}",
+    response_model=TestExecutionDetailsResponse,
+)
+async def get_test_execution_details(
+    ivr_architecture_id: UUID,
+    test_case_id: UUID,
+    execution_id: UUID,
+    _: Annotated[dict, Depends(get_current_user)],
+    use_case: Annotated[
+        GetTestExecutionDetailsUseCase, Depends(get_test_execution_details_use_case)
+    ],
+):
+    """Obtiene los detalles completos de una ejecucion de test.
+    
+    Retorna la ejecucion junto con:
+    - TestCase asociado y su IVRArchitecture
+    - Logs ordenados de cada paso (expected_text, actual_transcription, confidence, action)
+    
+    Util para analisis forense y debugging de fallos.
+    
+    Args:
+        ivr_architecture_id: ID de la arquitectura IVR (jerarquia de ruta)
+        test_case_id: ID del test case (jerarquia de ruta)
+        execution_id: ID de la ejecucion a analizar
+    
+    Returns:
+        TestExecutionDetailsResponse con toda la informacion anidada
+    """
+    return await use_case.execute(execution_id=execution_id)

@@ -61,5 +61,7 @@ class TestExecutionModel(Base):
         back_populates="executions"
     )
     logs: Mapped[list["ExecutionLogModel"]] = relationship(  # noqa: F821
-        back_populates="execution", cascade="all, delete-orphan"
+        back_populates="execution",
+        cascade="all, delete-orphan",
+        order_by="ExecutionLogModel.step_number",
     )
