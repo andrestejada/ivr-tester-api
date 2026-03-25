@@ -243,13 +243,19 @@ class DeepgramASRProvider(IASRProvider):
                 alternative = channel.alternatives[0]
                 text = alternative.transcript if hasattr(alternative, 'transcript') else ""
                 is_final = transcript.is_final if hasattr(transcript, 'is_final') else False
+                speech_final = transcript.speech_final if hasattr(transcript, 'speech_final') else False
                 
                 if text:
                     logger.debug(
-                        f"📝 Transcripción {'final' if is_final else 'parcial'}: {text}"
+                        f"📝 Transcripción {'final' if is_final else 'parcial'}, speech_final={speech_final}: {text}"
                     )
-                    # Invocar callback del orquestador
-                    await self._transcript_handler(text, is_final)
+                    # Invocar callback del orquestador: text, is_final, speech_final
+                    # Para mantener compatibilidad si el callback no acepta 3 parametros,
+                    # lo logueamos, pero vamos a pasar los 3 parametros si lo soportamos.
+                    try:
+                        await self._transcript_handler(text, is_final, speech_final)
+                    except TypeError:
+                        await self._transcript_handler(text, is_final)
 
         except Exception as e:
             logger.error(f"❌ Error procesando transcripción de Deepgram: {e}")

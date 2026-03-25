@@ -25,14 +25,12 @@ class IASRProvider(ABC):
 
     @abstractmethod
     async def set_transcript_handler(
-        self, callback: Callable[[str, bool], Awaitable[None]]
+        self, callback: Callable[[str, bool, bool], Awaitable[None]]
     ) -> None:
         """Registra un callback para recibir transcripciones parciales y finales.
         
         Args:
-            callback: Función asíncrona que recibe (texto: str, es_final: bool).
-                     Será invocada cada vez que el proveedor emita un fragmento
-                     de transcripción.
+            callback: fn(texto: str, is_final: bool, speech_final: bool)
         """
         pass
 

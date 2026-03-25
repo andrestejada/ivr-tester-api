@@ -323,15 +323,24 @@ class ExecuteTestCaseUseCase:
         transcript_parts: list[str] = []
         current_partial: str = ""
         transcript_final = asyncio.Event()
+        
+        # Guardaremos el tiempo en el que se recibió el último fragmento de texto
+        last_text_time = time()
 
-        async def _on_transcript(text: str, is_final: bool) -> None:
-            nonlocal current_partial
+        async def _on_transcript(text: str, is_final: bool, speech_final: bool = False) -> None:
+            nonlocal current_partial, last_text_time
+            
+            # Si recibimos texto (sea final o parcial), actualizamos el last_text_time
+            if text:
+                last_text_time = time()
+                
             if is_final:
                 if text:
                     transcript_parts.append(text)
                 current_partial = ""
-                # Deepgram emitirá is_final=True al detectar un silencio según el endpointing
-                transcript_final.set()
+                # Si Deepgram detecta que es el fin de la voz (endpointing), seteamos el final
+                if speech_final:
+                    transcript_final.set()
             else:
                 if text:
                     current_partial = text
@@ -366,26 +375,36 @@ class ExecuteTestCaseUseCase:
                         call_sid, timeout_seconds=STREAM_POLL_SECONDS
                     )
                 except ValueError as e:
-                    logger.error(f"Step {step_number}: audio queue error: {e}")
-                    return None, "Audio queue error"
+                    # Call has been closed on Stream stop, o se eliminó la sesión.
+                    logger.info(f"Step {step_number}: call session ended while waiting audio: {e}")
+                    break
 
                 if chunk:
                     got_audio = True
+                    # Solo actualizamos el tiempo de último audio si el chunk NO ES silencio (o lo asumimos siempre).
+                    # Twilio manda chunks constantemente incluso si hay silencio. Por lo que "last_audio_time" 
+                    # nunca se va a dar a menos que se use VAD local, o Deepgram nos avise de is_final.
+                    # Deepgram endpointing es la mejor estrategia para el silencio.
                     last_audio_time = time()
                     await self.asr_provider.send_audio(chunk)
 
-                # Si ya hubo audio, y pasaron N segundos sin chunks (esto suele significar que Twilio dejó de enviar, ej. call terminada)
-                if got_audio and (time() - last_audio_time) >= SILENCE_TIMEOUT_SECONDS + 3.0:
-                    logger.debug(f"Step {step_number}: timeout de silence absoluto, asumiendo fin de audio.")
+                # Si Deepgram no manda "is_final", last_audio_time siempre se renueva con el ruido de fondo
+                # porque Twilio manda audio continuamente. Necesitamos depender del endpointing o `is_final`
+                # de Deepgram y cortar si el *tiempo desde el último fragmento transcrito* supera X.
+                
+                # Si pasaron N segundos desde el último fragmento de TEXTO transcrito, asumimos que hubo silencio
+                # absoluto largo o la persona dejó de hablar (Fallback de seguridad).
+                if got_audio and (time() - last_text_time) >= SILENCE_TIMEOUT_SECONDS + 3.0:
+                    logger.debug(
+                        f"Step {step_number}: timeout de silence absoluto ({SILENCE_TIMEOUT_SECONDS + 3.0}s) tras texto de deepgram, finalizando step"
+                    )
                     break
-                    
-                # Si Deepgram nos indicó que la transcripción finalizó debido a que se identificó el fin del habla (endpointing)
-                # podemos salir.
+
+                # Si Deepgram nos indicó que la transcripción finalizó debido a que se identificó fin de habla (speech_final)
                 if transcript_final.is_set():
                     logger.debug(f"Step {step_number}: Deepgram detectó endpointing y finalizó.")
-                    # A veces Deepgram manda is_final pero no envía instantáneamente todos los fragmentos
-                    # Agregamos una pausa micro aquí para no cortar la conexión a la mitad de otro mensaje en camino
-                    await asyncio.sleep(0.5) 
+                    # Dar tiempo a atributos tardíos para llegar antes de cerrar
+                    await asyncio.sleep(0.5)
                     break
         finally:
             try:
