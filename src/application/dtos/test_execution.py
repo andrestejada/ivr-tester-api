@@ -6,12 +6,6 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 
-class ExecuteTestCaseRequest(BaseModel):
-    """Request DTO to execute a test case."""
-
-    phone_number: str = Field(..., description="Phone number to call (e.g., +1234567890)")
-
-
 class TestExecutionResponse(BaseModel):
     """Response DTO for a test execution."""
 

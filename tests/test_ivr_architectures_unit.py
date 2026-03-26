@@ -32,9 +32,13 @@ class TestCreateIVRArchitectureRequestSchema:
         with pytest.raises(ValidationError):
             CreateIVRArchitectureRequest(name="Sales IVR", phone_number="555-ABC-1234")
 
-    def test_phone_number_with_special_chars(self):
-        with pytest.raises(ValidationError):
-            CreateIVRArchitectureRequest(name="Sales IVR", phone_number="555-123-4567")
+    def test_phone_number_with_plus(self):
+        req = CreateIVRArchitectureRequest(name="Sales IVR", phone_number="+5551234567")
+        assert req.phone_number == "+5551234567"
+
+    def test_phone_number_with_spaces_and_dashes(self):
+        req = CreateIVRArchitectureRequest(name="Sales IVR", phone_number="+555 123-4567")
+        assert req.phone_number == "+555 123-4567"
 
     def test_phone_number_empty(self):
         with pytest.raises(ValidationError):

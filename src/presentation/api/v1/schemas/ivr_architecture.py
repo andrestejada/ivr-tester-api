@@ -17,8 +17,9 @@ class CreateIVRArchitectureRequest(BaseModel):
     @field_validator("phone_number")
     @classmethod
     def validate_phone_number(cls, v: str) -> str:
-        if not re.match(r"^\d+$", v):
-            raise ValueError("El teléfono debe contener solo números")
+        # Permitir formato internacional: +[dígitos], con espacios y guiones opcionales
+        if not re.match(r"^\+?[\d\s-]+$", v):
+            raise ValueError("El teléfono debe contener solo números, +, espacios o guiones")
         return v
 
     @field_validator("description")

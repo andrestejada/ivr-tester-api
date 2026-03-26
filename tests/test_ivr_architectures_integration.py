@@ -52,7 +52,7 @@ class TestCreateIVRArchitectureEndpoint:
             "/api/v1/ivr-architectures",
             json={
                 "name": "Sales IVR",
-                "phone_number": "555-123-4567",
+                "phone_number": "555-ABC-4567",
             },
             headers={"Authorization": f"Bearer {valid_token}"},
         )

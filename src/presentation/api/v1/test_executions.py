@@ -18,7 +18,6 @@ from src.application.dtos import (
     TestExecutionResponse,
     TestExecutionDetailsResponse,
 )
-from src.application.dtos.test_execution import ExecuteTestCaseRequest
 from src.domain.repositories.ivr_architecture_repository import IIVRArchitectureRepository
 from src.presentation.dependencies import get_list_test_executions_use_case
 from src.presentation.dependencies.execution_dependencies import (
@@ -59,7 +58,6 @@ async def list_test_executions(
 async def execute_test_case(
     ivr_architecture_id: UUID,
     test_case_id: UUID,
-    request: ExecuteTestCaseRequest,
     _: Annotated[dict, Depends(get_current_user)],
     use_case: Annotated[ExecuteTestCaseUseCase, Depends(get_execute_test_case_use_case)],
     ivr_repo: Annotated[IIVRArchitectureRepository, Depends(get_ivr_architecture_repo)],
@@ -69,7 +67,7 @@ async def execute_test_case(
     Retorna 202 Accepted con la ejecución en estado RUNNING.
     La ejecución de la llamada se procesa en background dentro del Use Case.
     """
-    # Obtener arquitectura para extraer el provider
+    # Obtener arquitectura para extraer el provider y phone number
     architecture = await ivr_repo.get_by_id(ivr_architecture_id)
     
     # Construir webhook_url dinámicamente basada en el provider
@@ -85,7 +83,7 @@ async def execute_test_case(
     # y lanzar la tarea pesada en background (asyncio.create_task).
     execution = await use_case.execute(
         test_case_id=test_case_id,
-        phone_number=request.phone_number,
+        phone_number=architecture.phone_number,
         webhook_url=webhook_url,
     )
     

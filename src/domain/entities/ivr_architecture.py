@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID
+import re
 
 
 @dataclass
@@ -19,7 +20,8 @@ class IVRArchitectureEntity:
     def __post_init__(self) -> None:
         if not self.name or len(self.name) > 250:
             raise ValueError("El nombre debe tener entre 1 y 250 caracteres")
-        if not self.phone_number.isdigit():
-            raise ValueError("El teléfono debe contener solo números")
+        # Permitir números, +, espacios y guiones (formato internacional)
+        if not re.match(r"^\+?[\d\s-]+$", self.phone_number):
+            raise ValueError("El teléfono debe contener solo números, +, espacios o guiones")
         if not self.provider:
             raise ValueError("El provider no puede estar vacío")
