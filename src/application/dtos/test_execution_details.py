@@ -57,6 +57,7 @@ class TestExecutionDetailsResponse(BaseModel):
     - Execution metadata (id, status, duration, provider_call_sid, executed_at)
     - Associated Test Case with its IVR Architecture
     - Ordered list of execution step logs for analysis
+    - Full call transcript for debugging and audit purposes
     """
 
     id: UUID
@@ -64,6 +65,7 @@ class TestExecutionDetailsResponse(BaseModel):
     status: str
     duration_seconds: int | None
     provider_call_sid: str | None
+    full_call_transcript: str | None
     executed_at: datetime
     # Nested relations
     test_case: TestCaseDetailResponse
