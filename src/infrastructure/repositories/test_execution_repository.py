@@ -136,6 +136,25 @@ class TestExecutionRepository(ITestExecutionRepository):
         
         return self._to_entity(model)
 
+    async def update_provider_call_sid(
+        self, execution_id: UUID, provider_call_sid: str
+    ) -> TestExecutionEntity:
+        """Actualiza el provider_call_sid de una ejecución."""
+        result = await self.session.execute(
+            select(TestExecutionModel).where(TestExecutionModel.id == execution_id)
+        )
+        model = result.scalars().first()
+        if not model:
+            raise NotFoundError(f"Test execution {execution_id} not found")
+
+        model.provider_call_sid = provider_call_sid
+        await self.session.flush()
+        logger.info(
+            f"Updated execution {execution_id}: provider_call_sid={provider_call_sid}"
+        )
+
+        return self._to_entity(model)
+
     async def update_full_call_transcript(
         self, execution_id: UUID, full_call_transcript: str
     ) -> TestExecutionEntity:

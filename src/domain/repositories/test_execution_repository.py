@@ -54,6 +54,21 @@ class ITestExecutionRepository(ABC):
         pass
 
     @abstractmethod
+    async def update_provider_call_sid(
+        self, execution_id: UUID, provider_call_sid: str
+    ) -> TestExecutionEntity:
+        """Actualiza el provider_call_sid de una ejecución.
+
+        Args:
+            execution_id: ID de la ejecución
+            provider_call_sid: Identificador de llamada retornado por el proveedor
+
+        Returns:
+            TestExecutionEntity actualizada
+        """
+        pass
+
+    @abstractmethod
     async def update_full_call_transcript(
         self, execution_id: UUID, full_call_transcript: str
     ) -> TestExecutionEntity:

@@ -123,6 +123,15 @@ class TestExecuteTestCaseUseCase:
             executed_at=datetime.now(timezone.utc),
         )
         mock_test_execution_repo.create.return_value = execution
+        persisted_execution = TestExecutionEntity(
+            id=execution.id,
+            test_case_id=test_case_id,
+            status="RUNNING",
+            duration_seconds=None,
+            provider_call_sid="CA123456789",
+            executed_at=execution.executed_at,
+        )
+        mock_test_execution_repo.update_provider_call_sid.return_value = persisted_execution
 
         # Mock call session returned by initiate_call
         call_session = CallSessionEntity(
@@ -191,6 +200,10 @@ class TestExecuteTestCaseUseCase:
             phone_number=phone_number,
             webhook_url=webhook_url,
         )
+        mock_test_execution_repo.update_provider_call_sid.assert_called_once_with(
+            execution.id,
+            provider_call_sid="CA123456789",
+        )
 
         # Verify streaming transcript handler was used
         assert mock_asr_provider.set_transcript_handler.call_count == 2
@@ -244,6 +257,15 @@ class TestExecuteTestCaseUseCase:
             executed_at=datetime.now(timezone.utc),
         )
         mock_test_execution_repo.create.return_value = execution
+        persisted_execution = TestExecutionEntity(
+            id=execution.id,
+            test_case_id=test_case_id,
+            status="RUNNING",
+            duration_seconds=None,
+            provider_call_sid="CA123456789",
+            executed_at=execution.executed_at,
+        )
+        mock_test_execution_repo.update_provider_call_sid.return_value = persisted_execution
         
         # Mock call session
         call_session = CallSessionEntity(
@@ -340,6 +362,15 @@ class TestExecuteTestCaseUseCase:
             executed_at=datetime.now(timezone.utc),
         )
         mock_test_execution_repo.create.return_value = execution
+        persisted_execution = TestExecutionEntity(
+            id=execution.id,
+            test_case_id=test_case_id,
+            status="RUNNING",
+            duration_seconds=None,
+            provider_call_sid="CA123456789",
+            executed_at=execution.executed_at,
+        )
+        mock_test_execution_repo.update_provider_call_sid.return_value = persisted_execution
         
         # Mock call session
         call_session = CallSessionEntity(

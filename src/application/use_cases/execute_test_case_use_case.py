@@ -149,8 +149,11 @@ class ExecuteTestCaseUseCase:
                 phone_number=phone_number,
                 webhook_url=webhook_url,
             )
-            execution.provider_call_sid = call_session.call_sid
-            logger.info(f"Call initiated: {call_session.call_sid}")
+            execution = await test_execution_repo.update_provider_call_sid(
+                execution.id,
+                provider_call_sid=call_session.call_sid,
+            )
+            logger.info(f"Call initiated and persisted: {call_session.call_sid}")
         except Exception as e:
             logger.error(f"Error initiating call: {e}")
             duration = int(time() - start_time)
@@ -164,6 +167,18 @@ class ExecuteTestCaseUseCase:
                 logger.error(
                     f"Failed to update execution {execution.id} status to ERROR after initiate_call failure: {e2}"
                 )
+            if "call_session" in locals():
+                try:
+                    await self.call_provider.hangup(call_session.call_sid)
+                    logger.info(
+                        "Call hung up after provider_call_sid persistence failure: %s",
+                        call_session.call_sid,
+                    )
+                except Exception as e3:
+                    logger.warning(
+                        "Could not hang up call after provider_call_sid persistence failure: %s",
+                        str(e3),
+                    )
             return
 
         try:
