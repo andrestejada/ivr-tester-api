@@ -16,6 +16,7 @@ from difflib import SequenceMatcher
 from time import time
 from dataclasses import dataclass, field
 from typing import Callable
+import hashlib
 
 from src.infrastructure.logger import get_logger
 
@@ -55,6 +56,8 @@ class IVRStateMachineState:
     transcript_final_event: asyncio.Event = field(default_factory=asyncio.Event)
     early_match_found: bool = False
     previous_step_transcript: str = ""  # Transcripción anterior del step actual (para detectar repeticiones)
+    last_evaluated_text: str = ""  # Cache para evitar re-evaluar el mismo texto (reduce DEBUG logs)
+    last_match_result: 'StepMatchResult | None' = None  # Cache del ultimo resultado de match
 
 
 class IVRStateMachine:
@@ -87,6 +90,12 @@ class IVRStateMachine:
         self.flow_script = flow_script
         self.evaluate_transcription_fn = evaluate_transcription_fn
         self.state = IVRStateMachineState()
+        # Cache para resultados de evaluación de transcripción
+        # Clave: hash(expected_text, current_full_text, threshold)
+        # Valor: (ratio, confidence, is_match)
+        self._evaluation_cache: dict[str, tuple[float, Decimal, bool]] = {}
+        self._cache_hits = 0
+        self._cache_misses = 0
     
     def get_current_step(self) -> dict | None:
         """Obtiene el step actual."""
@@ -130,6 +139,50 @@ class IVRStateMachine:
             current_full_text += (" " + self.state.current_partial)
         return current_full_text.strip()
     
+    def _create_cache_key(self, expected: str, current: str, threshold: float) -> str:
+        """Create a deterministic cache key for a transcription evaluation request.
+        
+        Uses SHA256 to create a compact, deterministic key.
+        """
+        combined = f"{expected}|{current}|{threshold}"
+        return hashlib.sha256(combined.encode()).hexdigest()
+    
+    def _get_cached_evaluation(
+        self, expected: str, current: str, threshold: float
+    ) -> tuple[float, Decimal, bool] | None:
+        """Check if evaluation result is cached. Returns result or None if not cached."""
+        cache_key = self._create_cache_key(expected, current, threshold)
+        if cache_key in self._evaluation_cache:
+            self._cache_hits += 1
+            return self._evaluation_cache[cache_key]
+        self._cache_misses += 1
+        return None
+    
+    def _cache_evaluation_result(
+        self, expected: str, current: str, threshold: float,
+        result: tuple[float, Decimal, bool]
+    ) -> None:
+        """Cache an evaluation result. Implements simple size limit (max 1000 entries)."""
+        cache_key = self._create_cache_key(expected, current, threshold)
+        
+        # Simple eviction: if cache is full, clear it
+        if len(self._evaluation_cache) >= 1000:
+            self._evaluation_cache.clear()
+            logger.debug("Evaluation cache full (1000 entries), cleared")
+        
+        self._evaluation_cache[cache_key] = result
+    
+    def get_cache_stats(self) -> dict:
+        """Return cache statistics for monitoring."""
+        total = self._cache_hits + self._cache_misses
+        hit_rate = (self._cache_hits / total * 100) if total > 0 else 0
+        return {
+            "cache_hits": self._cache_hits,
+            "cache_misses": self._cache_misses,
+            "cache_size": len(self._evaluation_cache),
+            "hit_rate_percent": round(hit_rate, 2),
+        }
+    
     def check_for_step_match(self) -> StepMatchResult | None:
         """Evalúa si el texto acumulado hace match con el step actual.
         
@@ -152,12 +205,28 @@ class IVRStateMachine:
         if not current_full_text:
             return None  # Sin texto aún
         
-        # Evaluamos con umbral de early exit
-        ratio, confidence, is_match = self.evaluate_transcription_fn(
+        # Try to get cached evaluation result first
+        cached_result = self._get_cached_evaluation(
             expected_text,
             current_full_text,
-            threshold=EARLY_EXIT_THRESHOLD
+            EARLY_EXIT_THRESHOLD
         )
+        
+        if cached_result is not None:
+            ratio, confidence, is_match = cached_result
+            logger.debug(
+                f"Step {step_number}: Cache HIT | expected='{expected_text}' | "
+                f"confidence={confidence}% | hit_rate={self.get_cache_stats()['hit_rate_percent']}%"
+            )
+        else:
+            # Evaluamos con umbral de early exit
+            ratio, confidence, is_match = self.evaluate_transcription_fn(
+                expected_text,
+                current_full_text,
+                threshold=EARLY_EXIT_THRESHOLD
+            )
+            # Cache the result
+            self._cache_evaluation_result(expected_text, current_full_text, EARLY_EXIT_THRESHOLD, (ratio, confidence, is_match))
         
         if is_match:
             logger.info(
