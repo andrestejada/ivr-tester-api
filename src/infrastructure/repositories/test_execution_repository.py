@@ -136,6 +136,31 @@ class TestExecutionRepository(ITestExecutionRepository):
         
         return self._to_entity(model)
 
+    async def update_full_call_transcript(
+        self, execution_id: UUID, full_call_transcript: str
+    ) -> TestExecutionEntity:
+        """Actualiza la transcripción completa de la llamada.
+        
+        Args:
+            execution_id: ID de la ejecución
+            full_call_transcript: Texto completo de la llamada
+            
+        Returns:
+            TestExecutionEntity actualizada
+        """
+        result = await self.session.execute(
+            select(TestExecutionModel).where(TestExecutionModel.id == execution_id)
+        )
+        model = result.scalars().first()
+        if not model:
+            raise NotFoundError(f"Test execution {execution_id} not found")
+        
+        model.full_call_transcript = full_call_transcript
+        await self.session.flush()
+        logger.info(f"Updated execution {execution_id}: transcript length={len(full_call_transcript or '')} chars")
+        
+        return self._to_entity(model)
+
     @staticmethod
     def _to_entity(model: TestExecutionModel) -> TestExecutionEntity:
         """Convierte un TestExecutionModel en TestExecutionEntity."""
@@ -146,4 +171,5 @@ class TestExecutionRepository(ITestExecutionRepository):
             duration_seconds=model.duration_seconds,
             provider_call_sid=model.provider_call_sid,
             executed_at=model.executed_at,
+            full_call_transcript=model.full_call_transcript,
         )

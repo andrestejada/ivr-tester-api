@@ -31,6 +31,11 @@ def setup_logger() -> logging.Logger:
     # Add handler to root logger so all loggers are visible
     root_logger.addHandler(console_handler)
 
+    # Reduce verbose logging from external libraries
+    logging.getLogger("twilio.http_client").setLevel(logging.WARNING)  # Hide HTTP headers
+    logging.getLogger("urllib3.connectionpool").setLevel(logging.WARNING)  # Hide connection pool debug
+    logging.getLogger("src.infrastructure.providers.deepgram_asr_provider").setLevel(log_level)  # Keep Deepgram
+    
     return logging.getLogger("ivr_tester")
 
 def get_logger(name: str) -> logging.Logger:

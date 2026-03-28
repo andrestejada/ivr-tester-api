@@ -17,6 +17,7 @@ from src.domain.repositories.execution_log_repository import IExecutionLogReposi
 from src.domain.repositories.test_case_repository import ITestCaseRepository
 from src.domain.repositories.test_execution_repository import ITestExecutionRepository
 from src.application.exceptions import NotFoundError
+from src.application.services.ivr_state_machine import IVRStateMachine, SILENCE_THRESHOLD_SECONDS
 from src.infrastructure.call_session_store import CallSessionStore
 from src.infrastructure.database.uow import UnitOfWork
 from src.infrastructure.logger import get_logger
@@ -25,9 +26,8 @@ logger = get_logger(__name__)
 
 # Constantes
 AUDIO_TIMEOUT_SECONDS = 30.0
-SILENCE_TIMEOUT_SECONDS = 5.0  # Damos más tiempo, 5 segundos de silencio total antes de cortar
 STREAM_POLL_SECONDS = 0.5
-SIMILARITY_THRESHOLD = 0.80  # 80%
+REPETITION_THRESHOLD = 0.50  # 50% - similitud para detectar si el IVR está repitiendo el menú
 
 
 class ExecuteTestCaseUseCase:
@@ -186,38 +186,43 @@ class ExecuteTestCaseUseCase:
             
             logger.info("Call answered and session active. Beginning step execution.")
 
-            # 3. Bucle por los pasos
-            all_passed = True
-            for step_index, step in enumerate(test_case.flow_script, start=1):
-                try:
-                    passed = await self._process_single_step(
-                        execution_id=execution.id,
-                        call_sid=call_session.call_sid,
-                        step=step,
-                        step_index=step_index,
-                        execution_log_repo=execution_log_repo,
-                    )
-                    if not passed:
-                        all_passed = False
-                        break
-                except Exception as e:
-                    logger.error(
-                        f"Unexpected error processing step {step_index} in execution {execution.id}: {e}",
-                        exc_info=True,
-                    )
-                    await test_execution_repo.update_status(
-                        execution.id,
-                        status="ERROR",
-                        duration_seconds=int(time() - start_time),
-                    )
-                    # Intentar colgar en caso de error crítico
-                    try:
-                        await self.call_provider.hangup(call_session.call_sid)
-                    except Exception:
-                        pass
-                    return
+            # Conexión ASR persistente para todo el test case
+            asr_connected = False
+            try:
+                logger.info("ASR: Conectando Deepgram para todo el flujo de pasos...")
+                await self.asr_provider.connect(
+                    encoding="mulaw",
+                    sample_rate=8000,
+                    endpointing=int(SILENCE_THRESHOLD_SECONDS * 1000),
+                )
+                asr_connected = True
+                logger.info("ASR: Conexión Deepgram establecida (persistente)")
+            except Exception as e:
+                logger.error(f"ASR: Falló conexión persistente antes de ejecutar pasos: {e}")
+                raise
 
-            # 3. Finalizar ejecución y colgar llamada
+            # 3. Procesar flujo con máquina de estados
+            all_passed, full_call_transcript = await self._process_flow_with_state_machine(
+                execution_id=execution.id,
+                call_sid=call_session.call_sid,
+                flow_script=test_case.flow_script,
+                execution_log_repo=execution_log_repo,
+            )
+            
+            # 4. Guardar transcript completo en BD
+            try:
+                logger.info(f"Saving full_call_transcript to database | length={len(full_call_transcript)} chars")
+                await test_execution_repo.update_full_call_transcript(
+                    execution.id,
+                    full_call_transcript,
+                )
+                logger.info(f"✓ Full transcript saved successfully")
+            except Exception as e:
+                logger.error(f"Failed to save full_call_transcript: {e}")
+                # No es fatal, continuamos de todas formas
+
+            # 5. Finalizar ejecución y colgar llamada
+            logger.info(f"FLOW EXECUTION END | all_passed={all_passed} | execution_id={execution.id}")
             await self._finalize_execution(
                 execution.id,
                 call_session.call_sid,
@@ -238,12 +243,155 @@ class ExecuteTestCaseUseCase:
             except Exception as e2:
                 logger.error(f"Could not update status after background error: {e2}")
 
+        finally:
+            if asr_connected:
+                try:
+                    await self.asr_provider.disconnect()
+                    logger.info("ASR: Desconectado persistentemente al final de la ejecución")
+                except Exception as e:
+                    logger.warning(f"ASR: Error al desconectar después de ejecución: {e}")
+
+    async def _process_flow_with_state_machine(
+        self,
+        execution_id: UUID,
+        call_sid: str,
+        flow_script: list[dict],
+        execution_log_repo: IExecutionLogRepository,
+    ) -> tuple[bool, str]:
+        """Procesa el flujo IVR completo usando máquina de estados continua.
+        
+        Retorna (all_passed, full_call_transcript).
+        
+        Implementa:
+        - Un único bucle continuo escuchando ASR
+        - Máquina de estados para detectar matching dinámico
+        - Timeouts por step (15 segundos)
+        - Soporte para steps sin action
+        """
+        logger.info(f"STATE MACHINE FLOW START | total_steps={len(flow_script)} | execution_id={execution_id}")
+        
+        # 1. Iniciar máquina de estados
+        state_machine = IVRStateMachine(
+            flow_script=flow_script,
+            evaluate_transcription_fn=self._evaluate_transcription,
+        )
+        
+        # 2. Configurar callback de ASR
+        async def _on_transcript(text: str, is_final: bool, speech_final: bool = False) -> None:
+            """Callback invocado por Deepgram cuando llega texto."""
+            state_machine.accumulate_transcript_text(text, is_final, speech_final)
+        
+        try:
+            await self.asr_provider.set_transcript_handler(_on_transcript)
+            logger.debug(f"ASR: Transcript handler registrado a máquina de estados")
+        except Exception as e:
+            logger.error(f"ASR: Error registrando handler: {e}")
+            return False, ""
+        
+        # 3. Bucle principal continuo
+        all_passed = True
+        try:
+            while not state_machine.is_flow_complete():
+                current_step = state_machine.get_current_step()
+                if current_step is None:
+                    break
+                
+                step_number = current_step.get("step", state_machine.state.current_step_index + 1)
+                
+                # 3a. Obtener audio chunks y enviarlos al ASR
+                try:
+                    chunk = await self.call_session_store.try_dequeue_audio(
+                        call_sid, timeout_seconds=STREAM_POLL_SECONDS
+                    )
+                    if chunk:
+                        await self.asr_provider.send_audio(chunk)
+                except ValueError:
+                    # Sesión cerrada
+                    logger.info(f"Step {step_number}: Call session ended")
+                    break
+                
+                # 3b. Chequear si hay match con el step actual
+                match_result = state_machine.check_for_step_match()
+                if match_result:
+                    logger.info(
+                        f"Step {step_number}: ✓ MATCH DETECTED | matched_text='{match_result.matched_text}' | "
+                        f"confidence={match_result.confidence}% | action={match_result.action_to_execute or 'None'}"
+                    )
+                    
+                    # 3b1. Ejecutar acción (DTMF) si aplica
+                    if match_result.action_to_execute:
+                        action_log, has_error = await self._execute_action(
+                            call_sid, match_result.action_to_execute, step_number
+                        )
+                        if has_error:
+                            logger.error(f"Step {step_number}: DTMF execution failed: {action_log}")
+                            all_passed = False
+                            break
+                    else:
+                        action_log = "No action (passive step)"
+                        logger.info(f"Step {step_number}: Passive step (no action required)")
+                    
+                    # 3b2. Guardar log del step en BD
+                    await self._log_step(
+                        execution_id,
+                        step_number,
+                        current_step.get("listen", ""),
+                        match_result.matched_text,
+                        match_result.confidence,
+                        action_log,
+                        execution_log_repo=execution_log_repo,
+                    )
+                    
+                    # 3b3. Avanzar al siguiente step
+                    state_machine.advance_to_next_step(match_result.matched_text)
+                    continue
+                
+                # 3c. Chequear relaciones entre transcripción actual y anterior
+                current_full_text = state_machine.get_full_text_buffer()
+                
+                # 3c1. Detectar si el IVR está repitiendo el mismo menú (contenido se repite >= 50%)
+                if current_full_text and len(current_full_text) > 10:  # Solo si hay suficiente texto
+                    if state_machine.check_if_step_repeated(current_full_text, repeat_threshold=0.50):
+                        # El IVR está repitiendo → ninguna opción hizo match durante el ciclo anterior
+                        logger.warning(
+                            f"Step {step_number}: ✗ REPETITION → No match found. "
+                            f"IVR is repeating the menu. Expected: '{current_step.get('listen', '')}'"
+                        )
+                        all_passed = False
+                        break
+                
+                # 3c2. Chequear silencio (informativo - no interrumpe la espera)
+                silence_duration = state_machine.get_silence_duration()
+                if silence_duration >= SILENCE_THRESHOLD_SECONDS and silence_duration < SILENCE_THRESHOLD_SECONDS + 0.1:
+                    # Log una sola vez cuando cruza el umbral (evitar spam)
+                    logger.debug(
+                        f"Step {step_number}: Silence detected ({silence_duration:.1f}s) "
+                        f"- continuing to listen for expected text..."
+                    )
+                
+                # 3d. Permitir que otros tasks ejecuten
+                await asyncio.sleep(0.01)
+        
+        except Exception as e:
+            logger.error(f"STATE MACHINE FLOW ERROR: {e}", exc_info=True)
+            all_passed = False
+        
+        # 4. Finalizar y obtener transcript completo
+        final_transcript = state_machine.finalize_and_get_full_transcript()
+        logger.info(
+            f"STATE MACHINE FLOW END | all_passed={all_passed} | transcript_length={len(final_transcript)} | "
+            f"steps_processed={state_machine.state.current_step_index}/{len(flow_script)}"
+        )
+        
+        return all_passed, final_transcript
+
     async def _process_single_step(
         self,
         execution_id: UUID,
         call_sid: str,
         step: dict,
         step_index: int,
+        should_clear_queue: bool = True,
         execution_log_repo: IExecutionLogRepository | None = None,
     ) -> bool:
         """Procesa un único paso del test case (audio, transcripción, evaluación, acción y log). Retorna True si pasó."""
@@ -253,12 +401,22 @@ class ExecuteTestCaseUseCase:
 
         execution_log_repo = execution_log_repo or self.execution_log_repo
         
-        logger.info(f"Step {step_number}: listening for '{expected_text}'")
+        # === BEGIN STEP LOG ===
+        logger.info(f"{'='*80}")
+        logger.info(f"Step {step_number}: START | listening for: '{expected_text}' | action_required: {action}")
+        logger.info(f"{'='*80}")
         
-        # 1. Esperar audio y transcribir
-        transcription, error_msg = await self._get_transcription(call_sid, step_number)
+        # 1. Esperar audio y transcribir con early exit si hay partial match
+        logger.debug(f"Step {step_number}: Waiting for transcription...")
+        transcription_start = time()
+        transcription, error_msg = await self._get_transcription(
+            call_sid, step_number, expected_text, should_clear_queue
+        )
+        transcription_elapsed = time() - transcription_start
+        
         if error_msg:
             # Fallo en el audio o transcripción
+            logger.error(f"Step {step_number}: ✗ TRANSCRIPTION ERROR - {error_msg} (elapsed={transcription_elapsed:.2f}s)")
             await self._log_step(
                 execution_id,
                 step_number,
@@ -269,12 +427,16 @@ class ExecuteTestCaseUseCase:
                 execution_log_repo=execution_log_repo,
             )
             return False
+        
+        logger.debug(f"Step {step_number}: Transcription received in {transcription_elapsed:.2f}s: '{transcription}'")
             
         # 2. Evaluar similitud del texto
+        logger.debug(f"Step {step_number}: Evaluating transcription similarity...")
         similarity, confidence, is_match = self._evaluate_transcription(expected_text, transcription)
-        logger.info(f"Step {step_number}: similarity={similarity:.0%} (threshold={SIMILARITY_THRESHOLD:.0%})")
+        logger.info(f"Step {step_number}: MATCH EVALUATION | similarity={similarity:.0%} | confidence={confidence} | threshold={SIMILARITY_THRESHOLD:.0%} | result={'✓ PASS' if is_match else '✗ FAIL'}")
+        
         if not is_match:
-            logger.warning(f"Step {step_number}: text mismatch (expected '{expected_text}', got '{transcription}')")
+            logger.warning(f"Step {step_number}: ✗ TEXT MISMATCH | expected='{expected_text}' | transcribed='{transcription}'")
             await self._log_step(
                 execution_id,
                 step_number,
@@ -286,9 +448,16 @@ class ExecuteTestCaseUseCase:
             )
             return False
 
+        logger.info(f"Step {step_number}: ✓ TEXT MATCHED | confidence={confidence}%")
+
         # 3. Ejecutar acción (DTMF) si aplica
+        if action:
+            logger.info(f"Step {step_number}: DTMF ACTION REQUIRED | digits='{action}' | preparing to send...")
+        
         action_taken, action_error = await self._execute_action(call_sid, action, step_number)
+        
         if action_error:
+            logger.error(f"Step {step_number}: ✗ ACTION FAILED | {action_taken}")
             await self._log_step(
                 execution_id,
                 step_number,
@@ -301,6 +470,7 @@ class ExecuteTestCaseUseCase:
             return False
 
         # 4. Guardar log exitoso
+        logger.debug(f"Step {step_number}: Recording step log in database...")
         await self._log_step(
             execution_id,
             step_number,
@@ -310,25 +480,40 @@ class ExecuteTestCaseUseCase:
             action_taken,
             execution_log_repo=execution_log_repo,
         )
+        logger.info(f"Step {step_number}: ✓ COMPLETED successfully | action={action_taken} | confidence={confidence}%")
+        logger.info(f"{'='*80}")
         return True
 
-    async def _get_transcription(self, call_sid: str, step_number: int) -> tuple[str | None, str | None]:
-        """Extrae audio en streaming y espera transcripción final.
+    async def _get_transcription(
+        self, call_sid: str, step_number: int, expected_text: str = "", should_clear_queue: bool = True
+    ) -> tuple[str | None, str | None]:
+        """Extrae audio en streaming y espera transcripción final con early exit on partial match.
+        
+        Implementa evaluación en tiempo real: si se detecta que la transcripción parcial/final
+        cumple con el umbral de similitud, dispara un early exit para evitar la latencia de silencio.
         
         Retorna (transcripción, mensaje_de_error).
         """
-        # 1. Limpiar cola de audio de cualquier chunk residual del paso anterior o DTMF
-        await self.call_session_store.clear_queue(call_sid)
+        logger.debug(f"Step {step_number}: [ASR] Initializing audio capture | call_sid={call_sid} | expected_text='{expected_text}'")
+        
+        if should_clear_queue:
+            # 1. Limpiar cola de audio de cualquier chunk residual del inicio de la llamada
+            await self.call_session_store.clear_queue(call_sid)
+            logger.debug(f"Step {step_number}: [ASR] Audio queue cleared")
+        else:
+            logger.info(f"Step {step_number}: [ASR] PRESERVING audio queue to capture speech during DTMF/wait times")
         
         transcript_parts: list[str] = []
         current_partial: str = ""
         transcript_final = asyncio.Event()
+        early_match_found = False
         
         # Guardaremos el tiempo en el que se recibió el último fragmento de texto
         last_text_time = time()
+        asr_connect_start = time()
 
         async def _on_transcript(text: str, is_final: bool, speech_final: bool = False) -> None:
-            nonlocal current_partial, last_text_time
+            nonlocal current_partial, last_text_time, early_match_found
             
             # Si recibimos texto (sea final o parcial), actualizamos el last_text_time
             if text:
@@ -344,16 +529,28 @@ class ExecuteTestCaseUseCase:
             else:
                 if text:
                     current_partial = text
+            
+            # NOTA: Ya no evaluamos el early exit inmediatamente aquí.
+            # Se evaluará en el loop principal cuando haya una pausa (EARLY_EXIT_SILENCE_SECONDS).
 
         try:
-            await self.asr_provider.connect(
-                encoding="mulaw",
-                sample_rate=8000,
-                endpointing=int(SILENCE_TIMEOUT_SECONDS * 1000),
-            )
+            # Si la conexión persistente no está activa (surgery fallback), la creamos.
+            if not getattr(self.asr_provider, "_is_connected", False):
+                logger.debug(f"Step {step_number}: [ASR] Conexión no activa, realizando conexión de emergencia...")
+                await self.asr_provider.connect(
+                    encoding="mulaw",
+                    sample_rate=8000,
+                    endpointing=int(SILENCE_TIMEOUT_SECONDS * 1000),
+                )
+                asr_connect_elapsed = time() - asr_connect_start
+                logger.debug(f"Step {step_number}: [ASR] ✓ Connected in {asr_connect_elapsed:.3f}s")
+            else:
+                logger.debug(f"Step {step_number}: [ASR] Reutilizando conexión Deepgram persistente")
+
             await self.asr_provider.set_transcript_handler(_on_transcript)
+            logger.debug(f"Step {step_number}: [ASR] Transcript handler registered")
         except Exception as e:
-            logger.error(f"Step {step_number}: ASR connect error: {e}")
+            logger.error(f"Step {step_number}: [ASR] ✗ Connect error: {e}")
             return None, f"ASR connect error: {str(e)[:255]}"
 
         start_time = time()
@@ -365,7 +562,7 @@ class ExecuteTestCaseUseCase:
                 elapsed = time() - start_time
                 if elapsed >= AUDIO_TIMEOUT_SECONDS:
                     logger.warning(
-                        f"Step {step_number}: timeout waiting for whole audio ({AUDIO_TIMEOUT_SECONDS}s)"
+                        f"Step {step_number}: [ASR] timeout waiting for whole audio ({AUDIO_TIMEOUT_SECONDS}s)"
                     )
                     break
 
@@ -376,7 +573,7 @@ class ExecuteTestCaseUseCase:
                     )
                 except ValueError as e:
                     # Call has been closed on Stream stop, o se eliminó la sesión.
-                    logger.info(f"Step {step_number}: call session ended while waiting audio: {e}")
+                    logger.info(f"Step {step_number}: [ASR] call session ended while waiting audio: {e}")
                     break
 
                 if chunk:
@@ -388,72 +585,192 @@ class ExecuteTestCaseUseCase:
                     last_audio_time = time()
                     await self.asr_provider.send_audio(chunk)
 
-                # Si Deepgram no manda "is_final", last_audio_time siempre se renueva con el ruido de fondo
-                # porque Twilio manda audio continuamente. Necesitamos depender del endpointing o `is_final`
-                # de Deepgram y cortar si el *tiempo desde el último fragmento transcrito* supera X.
-                
-                # Si pasaron N segundos desde el último fragmento de TEXTO transcrito, asumimos que hubo silencio
-                # absoluto largo o la persona dejó de hablar (Fallback de seguridad).
-                if got_audio and (time() - last_text_time) >= SILENCE_TIMEOUT_SECONDS + 3.0:
-                    logger.debug(
-                        f"Step {step_number}: timeout de silence absoluto ({SILENCE_TIMEOUT_SECONDS + 3.0}s) tras texto de deepgram, finalizando step"
-                    )
-                    break
+                # Evaluamos condiciones basadas en el tiempo transcurrido desde el último texto
+                if got_audio:
+                    time_since_last_text = time() - last_text_time
+                    
+                    # 1. === EARLY EXIT (Dual Strategy) ===
+                    if expected_text and not early_match_found:
+                        current_full_text = " ".join(transcript_parts) + (" " + current_partial if current_partial else "")
+                        current_full_text = current_full_text.strip()
+                        
+                        if current_full_text:
+                            # Evaluamos la transcripción actual en tiempo real
+                            ratio, _, is_match = self._evaluate_transcription(
+                                expected_text, 
+                                current_full_text,
+                                threshold=EARLY_EXIT_THRESHOLD
+                            )
+                            
+                            # Estrategia A: Match perfecto o casi perfecto (>= 86%)
+                            # Salimos inmediatamente para no robarnos el audio de la siguiente oración.
+                            # NOTA: Deepgram a veces transcribe mal ("minivr" en vez de "mi ivr" -> 86.79% match)
+                            if ratio >= 0.85:
+                                logger.info(
+                                    f"Step {step_number}: ✓ IMMEDIATE EARLY EXIT - match >= 85% ({ratio:.0%}) sin esperar silencio final. "
+                                    f"Expected: '{expected_text}', Got: '{current_full_text}'"
+                                )
+                                early_match_found = True
+                                break  # Salimos inmediatamente
+                                
+                            # Estrategia B: Match parcial (>= EARLY_EXIT_THRESHOLD) + Silencio
+                            # Si no es perfecto, esperamos un poquito de silencio para asegurar que terminó la idea.
+                            elif is_match and time_since_last_text >= EARLY_EXIT_SILENCE_SECONDS:
+                                logger.info(
+                                    f"Step {step_number}: ✓ EARLY EXIT CON SILENCIO - match >= {EARLY_EXIT_THRESHOLD:.0%} ({ratio:.0%}) AND {EARLY_EXIT_SILENCE_SECONDS}s of silence! "
+                                    f"Expected: '{expected_text}', Got: '{current_full_text}'"
+                                )
+                                early_match_found = True
+                                break  # Salimos inmediatamente
+                    
+                    # 2. === SILENCE TIMEOUT NORMAL ===
+                    # Si pasaron muchos segundos desde el último fragmento de TEXTO, asumimos que hubo silencio
+                    # absoluto largo o la persona dejó de hablar (Fallback de seguridad).
+                    if time_since_last_text >= SILENCE_TIMEOUT_SECONDS + 3.0:
+                        logger.debug(
+                            f"Step {step_number}: [ASR] timeout de silence absoluto ({SILENCE_TIMEOUT_SECONDS + 3.0}s) tras texto de deepgram, finalizando step"
+                        )
+                        break
 
                 # Si Deepgram nos indicó que la transcripción finalizó debido a que se identificó fin de habla (speech_final)
                 if transcript_final.is_set():
-                    logger.debug(f"Step {step_number}: Deepgram detectó endpointing y finalizó.")
+                    logger.debug(f"Step {step_number}: [ASR] Deepgram detectó endpointing y finalizó.")
                     # Dar tiempo a atributos tardíos para llegar antes de cerrar
                     await asyncio.sleep(0.5)
                     break
         finally:
-            try:
-                await self.asr_provider.disconnect()
-            except Exception:
-                pass
+            # Nota: NO se desconecta en cada step. La conexión es persistente y se cierra al final del flujo.
+            pass
 
-        # Reconstruir texto final
         final_text = " ".join(transcript_parts)
         if not final_text and current_partial:
             final_text = current_partial
 
         if final_text:
             final_text = final_text.strip()
-            logger.info(
-                f"Step {step_number}: transcribed '{final_text}'"
-            )
+            if early_match_found:
+                logger.info(
+                    f"Step {step_number}: [ASR] ✓ transcribed (early exit) '{final_text}'"
+                )
+            else:
+                logger.info(
+                    f"Step {step_number}: [ASR] ✓ transcribed (normal timeout) '{final_text}'"
+                )
             return final_text, None
 
         if not got_audio:
+            logger.error(f"Step {step_number}: [ASR] ✗ Timeout waiting for audio")
             return None, "Timeout waiting for audio"
 
+        logger.error(f"Step {step_number}: [ASR] ✗ No transcription received")
         return None, "No transcription received"
 
-    def _evaluate_transcription(self, expected_text: str, transcription: str) -> tuple[float, Decimal, bool]:
-        """Compara la transcripción con el texto esperado. Retorna (similitud, confidencia_decimal, es_acierto)."""
-        similarity = SequenceMatcher(
-            None, expected_text.lower(), transcription.lower()
-        ).ratio()
-        confidence = Decimal(str(similarity * 100)).quantize(Decimal("0.01"))
-        is_match = similarity >= SIMILARITY_THRESHOLD
-        return similarity, confidence, is_match
+    def _evaluate_transcription(self, expected_text: str, transcription: str, threshold: float | None = None) -> tuple[float, Decimal, bool]:
+        """Compara la transcripción con el texto esperado usando Sliding Window.
+        
+        Retorna (similitud, confidencia_decimal, es_acierto).
+        
+        Estrategia:
+        1. Primero intenta un match directo (fast path): si el expected_text está exactamente en la transcripción
+        2. Luego usa una ventana deslizante de palabras para encontrar la mejor coincidencia parcial
+        3. Si la transcripción es más corta que lo esperado, compara todo de inicio a fin (fallback)
+        
+        Args:
+            expected_text: Texto esperado a buscar
+            transcription: Texto transcrito
+            threshold: Umbral de similitud (0-1). Por defecto usa SIMILARITY_THRESHOLD. 
+                      Usa EARLY_EXIT_THRESHOLD para evaluación en streaming.
+        """
+        if threshold is None:
+            threshold = SIMILARITY_THRESHOLD
+            
+        exp_lower = expected_text.lower()
+        trans_lower = transcription.lower()
+        
+        # === FAST PATH 1: Exact substring match ===
+        if exp_lower in trans_lower:
+            logger.debug(f"_evaluate_transcription: EXACT MATCH found. Expected: '{expected_text}' (len={len(expected_text)}) in Transcription: '{transcription}' (len={len(transcription)})")
+            return 1.0, Decimal("100.00"), True
+        
+        # === SLIDING WINDOW APPROACH ===
+        # Dividir en palabras para una ventana semántica
+        words_exp = exp_lower.split()
+        words_trans = trans_lower.split()
+        window_size = len(words_exp)
+        
+        logger.debug(f"_evaluate_transcription: Using Sliding Window. Expected words={words_exp} (count={window_size}), Transcription words={words_trans} (count={len(words_trans)})")
+        
+        best_ratio = 0.0
+        best_window_idx = -1
+        
+        # Slide over chunks of the closest size to expected_text
+        if len(words_trans) >= window_size and window_size > 0:
+            for i in range(len(words_trans) - window_size + 1):
+                window_text = " ".join(words_trans[i:i + window_size])
+                ratio = SequenceMatcher(None, exp_lower, window_text).ratio()
+                logger.debug(f"  Window[{i}]: '{window_text}' -> ratio={ratio:.2%}")
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_window_idx = i
+        else:
+            # Fallback if transcription is shorter than expected: full comparison
+            logger.debug(f"_evaluate_transcription: Transcription shorter than expected, using full comparison fallback")
+            best_ratio = SequenceMatcher(None, exp_lower, trans_lower).ratio()
+            logger.debug(f"  Full comparison ratio={best_ratio:.2%}")
+        
+        confidence = Decimal(str(best_ratio * 100)).quantize(Decimal("0.01"))
+        is_match = best_ratio >= threshold
+        
+        logger.debug(f"_evaluate_transcription: FINAL RESULT - best_ratio={best_ratio:.2%}, confidence={confidence}, is_match={is_match}, threshold={threshold:.0%}")
+        
+        return best_ratio, confidence, is_match
 
     async def _execute_action(self, call_sid: str, action: str | None, step_number: int) -> tuple[str, bool]:
-        """Ejecuta una acción como enviar DTMF. Retorna (log_accion, hay_error)."""
+        """Ejecuta una acción como enviar DTMF. Retorna (log_accion, hay_error).
+        
+        Logs detallados para debugging de flujos DTMF y timing.
+        """
         if not action:
+            logger.debug(f"Step {step_number}: No action required (passive listening step)")
             return "No action (passive step)", False
             
         try:
             digits = str(action)
-            await self.call_provider.send_dtmf(call_sid=call_sid, digits=digits)
-            action_taken = f"Sent DTMF: {digits}"
-            logger.info(f"Step {step_number}: {action_taken}")
+            logger.info(f"Step {step_number}: [DTMF] ═══════════════════════════════════════════════════════════════")
+            logger.info(f"Step {step_number}: [DTMF] PREPARING TO SEND DTMF")
+            logger.info(f"Step {step_number}: [DTMF] | digits: '{digits}'")
+            logger.info(f"Step {step_number}: [DTMF] | call_sid: {call_sid}")
+            logger.debug(f"Step {step_number}: [DTMF] Timestamp: {datetime.now(timezone.utc).isoformat()}")
             
-            # Pausa para que el proveedor y el IVR estilicen los tonos antes de escuchar
+            dtmf_start = time()
+            await self.call_provider.send_dtmf(call_sid=call_sid, digits=digits)
+            dtmf_elapsed = time() - dtmf_start
+            
+            action_taken = f"Sent DTMF: {digits}"
+            logger.info(f"Step {step_number}: [DTMF] ✓ SUCCESSFULLY SENT")
+            logger.info(f"Step {step_number}: [DTMF] | digits: '{digits}'")
+            logger.info(f"Step {step_number}: [DTMF] | duration: {dtmf_elapsed:.3f}s")
+            logger.info(f"Step {step_number}: [DTMF] | timestamp_sent: {datetime.now(timezone.utc).isoformat()}")
+            logger.info(f"Step {step_number}: [DTMF] Waiting 0.5s for IVR to process tone...")
+            
+            # Pausa para que el proveedor y el IVR procesen los tonos antes de escuchar
+            pause_start = time()
             await asyncio.sleep(0.5)
+            pause_elapsed = time() - pause_start
+            
+            logger.info(f"Step {step_number}: [DTMF] ✓ POST-SEND PAUSE COMPLETE")
+            logger.info(f"Step {step_number}: [DTMF] | pause_duration: {pause_elapsed:.3f}s")
+            logger.info(f"Step {step_number}: [DTMF] | ready_for_next_step: {datetime.now(timezone.utc).isoformat()}")
+            logger.info(f"Step {step_number}: [DTMF] ═══════════════════════════════════════════════════════════════")
+            
             return action_taken, False
         except Exception as e:
-            logger.error(f"Step {step_number}: DTMF error: {e}")
+            logger.error(f"Step {step_number}: [DTMF] ═══════════════════════════════════════════════════════════════")
+            logger.error(f"Step {step_number}: [DTMF] ✗ FAILED TO SEND DTMF")
+            logger.error(f"Step {step_number}: [DTMF] | digits: '{action}'")
+            logger.error(f"Step {step_number}: [DTMF] | error: {str(e)}")
+            logger.error(f"Step {step_number}: [DTMF] | timestamp: {datetime.now(timezone.utc).isoformat()}")
+            logger.error(f"Step {step_number}: [DTMF] ═══════════════════════════════════════════════════════════════")
             return f"DTMF error: {str(e)[:255]}", True
 
     async def _log_step(
@@ -466,8 +783,13 @@ class ExecuteTestCaseUseCase:
         action_taken: str,
         execution_log_repo: IExecutionLogRepository | None = None,
     ):
-        """Encapsula la creación del log en base de datos para cada paso."""
+        """Encapsula la creación del log en base de datos para cada paso.
+        
+        Logs de persistencia para debugging de la capa de datos.
+        """
         execution_log_repo = execution_log_repo or self.execution_log_repo
+        logger.debug(f"Step {step_number}: [DB] Creating execution log | exec_id={execution_id} | expected='{expected_text}' | actual='{actual_transcription}' | confidence={confidence} | action='{action_taken}'")
+        
         log = ExecutionLogEntity(
             id=None,
             execution_id=execution_id,
@@ -478,7 +800,12 @@ class ExecuteTestCaseUseCase:
             action_taken=action_taken,
             created_at=datetime.now(timezone.utc),
         )
-        await execution_log_repo.create(log)
+        
+        try:
+            await execution_log_repo.create(log)
+            logger.debug(f"Step {step_number}: [DB] ✓ Execution log created and persisted")
+        except Exception as e:
+            logger.error(f"Step {step_number}: [DB] ✗ Failed to persist execution log | error={str(e)}", exc_info=True)
 
     async def _finalize_execution(
         self,
@@ -488,21 +815,29 @@ class ExecuteTestCaseUseCase:
         all_passed: bool,
         test_execution_repo: ITestExecutionRepository | None = None,
     ):
-        """Actualiza el estado final de la ejecución de prueba y cuelga la llamada."""
+        """Actualiza el estado final de la ejecución de prueba y cuelga la llamada.
+        
+        Logs de finalización y status para visibilidad del flujo completo.
+        """
         test_execution_repo = test_execution_repo or self.test_execution_repo
         duration = int(time() - start_time)
         final_status = "PASSED" if all_passed else "FAILED"
 
-        await test_execution_repo.update_status(
-            execution_id,
-            status=final_status,
-            duration_seconds=duration,
-        )
-        logger.info(f"Execution completed: {execution_id}, status={final_status}, duration={duration}s")
+        logger.info(f"FINALIZE EXECUTION | execution_id={execution_id} | status={final_status} | duration={duration}s")
+        
+        try:
+            await test_execution_repo.update_status(
+                execution_id,
+                status=final_status,
+                duration_seconds=duration,
+            )
+            logger.info(f"FINALIZE EXECUTION | ✓ Status updated in DB | status={final_status}")
+        except Exception as e:
+            logger.error(f"FINALIZE EXECUTION | ✗ Failed to update status | error={str(e)}", exc_info=True)
         
         try:
             await self.call_provider.hangup(call_sid)
-            logger.info(f"Call hung up: {call_sid}")
+            logger.info(f"FINALIZE EXECUTION | ✓ Call hung up | call_sid={call_sid}")
         except Exception as e:
-            logger.warning(f"Error hanging up call: {e}")
+            logger.warning(f"FINALIZE EXECUTION | ✗ Error hanging up call | error={str(e)}")
 

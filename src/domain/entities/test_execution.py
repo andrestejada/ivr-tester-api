@@ -15,6 +15,7 @@ class TestExecutionEntity:
     duration_seconds: int | None
     provider_call_sid: str | None
     executed_at: datetime
+    full_call_transcript: str | None = None
 
     def __post_init__(self) -> None:
         # basic invariants

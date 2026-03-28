@@ -4,7 +4,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String, func
+from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -54,6 +54,11 @@ class TestExecutionModel(Base):
     )
     executed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    full_call_transcript: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        comment="Complete transcript of the entire call for debugging and audit purposes",
     )
 
     # Relationships

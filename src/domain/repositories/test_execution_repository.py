@@ -52,3 +52,18 @@ class ITestExecutionRepository(ABC):
             TestExecutionEntity actualizada
         """
         pass
+
+    @abstractmethod
+    async def update_full_call_transcript(
+        self, execution_id: UUID, full_call_transcript: str
+    ) -> TestExecutionEntity:
+        """Actualiza la transcripción completa de la llamada.
+        
+        Args:
+            execution_id: ID de la ejecución
+            full_call_transcript: Texto completo de la llamada para debugging
+            
+        Returns:
+            TestExecutionEntity actualizada
+        """
+        pass
