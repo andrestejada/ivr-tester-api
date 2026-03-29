@@ -88,6 +88,7 @@ class TestGetTestExecutionDetailsUseCase:
             status="PASSED",
             duration_seconds=12,
             provider_call_sid="CA123",
+            full_call_transcript="Hola\nMundo\n",
             executed_at=datetime(2025, 1, 2, 12, 0, 0),
             test_case=test_case,
             logs=[
@@ -115,6 +116,7 @@ class TestGetTestExecutionDetailsUseCase:
 
         assert result.id == execution_model.id
         assert result.status == "PASSED"
+        assert result.full_call_transcript == "Hola\nMundo\n"
         assert result.test_case.id == test_case.id
         assert result.test_case.ivr_architecture.name == "Ventas IVR"
         assert len(result.logs) == 1
