@@ -2,10 +2,11 @@
 
 import asyncio
 import logging
+from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Query, status
 
 from src.infrastructure.auth.dependencies import get_current_user
 from src.infrastructure.config import settings
@@ -19,7 +20,9 @@ from src.application.dtos import (
     TestExecutionDetailsResponse,
 )
 from src.domain.repositories.ivr_architecture_repository import IIVRArchitectureRepository
-from src.presentation.dependencies import get_list_test_executions_use_case
+from src.presentation.dependencies import (
+    get_list_test_executions_use_case,
+)
 from src.presentation.dependencies.execution_dependencies import (
     get_execute_test_case_use_case,
 )

@@ -7,6 +7,14 @@ from src.application.dtos.test_execution_details import (
     TestCaseDetailResponse,
     TestExecutionDetailsResponse,
 )
+from src.application.dtos.analytics import (
+    AnalyticsResponse,
+    SelectedContext,
+    Summary,
+    Rankings,
+    RankingItem,
+    TrendPoint,
+)
 
 __all__ = [
     "IVRArchitectureResponse",
@@ -16,4 +24,10 @@ __all__ = [
     "IVRArchitectureDetailResponse",
     "TestCaseDetailResponse",
     "TestExecutionDetailsResponse",
+    "AnalyticsResponse",
+    "SelectedContext",
+    "Summary",
+    "Rankings",
+    "RankingItem",
+    "TrendPoint",
 ]

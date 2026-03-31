@@ -16,6 +16,9 @@ from src.application.use_cases.list_test_executions_use_case import (
 from src.application.use_cases.get_test_execution_details_use_case import (
     GetTestExecutionDetailsUseCase,
 )
+from src.application.use_cases.get_execution_analytics_use_case import (
+    GetExecutionAnalyticsUseCase,
+)
 
 __all__ = [
     "CreateIVRArchitectureUseCase",
@@ -24,4 +27,5 @@ __all__ = [
     "ListTestCasesUseCase",
     "ListTestExecutionsUseCase",
     "GetTestExecutionDetailsUseCase",
+    "GetExecutionAnalyticsUseCase",
 ]

@@ -121,3 +121,115 @@ class TestGetTestExecutionDetailsUseCase:
         assert result.test_case.ivr_architecture.name == "Ventas IVR"
         assert len(result.logs) == 1
 
+
+class TestGetExecutionAnalyticsUseCase:
+    """Tests para el caso de uso de analytics de ejecuciones."""
+
+    @pytest.mark.asyncio
+    async def test_execute_applies_defaults(self):
+        """Verifica que aplica defaults de fecha (últimos 7 días)."""
+        from datetime import datetime, timedelta, timezone
+        from src.application.use_cases.get_execution_analytics_use_case import (
+            GetExecutionAnalyticsUseCase,
+        )
+        from src.application.dtos import (
+            AnalyticsResponse,
+            SelectedContext,
+            Summary,
+            Rankings,
+        )
+
+        class FakeAnalyticsRepo:
+            async def get_execution_analytics(
+                self,
+                architecture_id,
+                test_case_id=None,
+                date_from=None,
+                date_to=None,
+                top_n=10,
+                include_blocks=None,
+            ):
+                # Verificar que se aplicaron defaults
+                assert date_from is not None
+                assert date_to is not None
+                assert (date_to - date_from).days == 7
+
+                return AnalyticsResponse(
+                    selected_context=SelectedContext(
+                        architecture_id=architecture_id,
+                        architecture_name="Test Arch",
+                        test_case_id=test_case_id,
+                        test_case_name=None,
+                        date_from=date_from,
+                        date_to=date_to,
+                    ),
+                    summary=Summary(
+                        total_executions=10,
+                        passed_count=8,
+                        failed_count=2,
+                        error_count=0,
+                        running_count=0,
+                        success_rate=80.0,
+                        failure_rate=20.0,
+                        avg_duration_seconds=5.5,
+                    ),
+                    rankings=Rankings(),
+                    trend=[],
+                )
+
+        use_case = GetExecutionAnalyticsUseCase(FakeAnalyticsRepo())
+        result = await use_case.execute(
+            architecture_id=UUID("550e8400-e29b-41d4-a716-446655440000"),
+            include_blocks=["summary"],
+        )
+
+        assert result.selected_context.architecture_id == UUID(
+            "550e8400-e29b-41d4-a716-446655440000"
+        )
+        assert result.summary is not None
+        assert result.summary.success_rate == 80.0
+
+    @pytest.mark.asyncio
+    async def test_execute_validates_date_range(self):
+        """Verifica que valida rango máximo de 90 días."""
+        from datetime import datetime, timedelta, timezone
+        from src.application.use_cases.get_execution_analytics_use_case import
+ GetExecutionAnalyticsUseCase
+
+        class FakeAnalyticsRepo:
+            async def get_execution_analytics(self, **kwargs):
+                pass
+
+        use_case = GetExecutionAnalyticsUseCase(FakeAnalyticsRepo())
+
+        # Rango > 90 días debe fallar
+        now = datetime.now(timezone.utc)
+        too_far = now - timedelta(days=91)
+
+        with pytest.raises(ValueError, match="Date range cannot exceed 90 days"):
+            await use_case.execute(
+                architecture_id=UUID("550e8400-e29b-41d4-a716-446655440000"),
+                date_from=too_far,
+                date_to=now,
+            )
+
+    @pytest.mark.asyncio
+    async def test_execute_validates_top_n(self):
+        """Verifica que valida top_n entre 1 y 50."""
+        from src.application.use_cases.get_execution_analytics_use_case import (
+            GetExecutionAnalyticsUseCase,
+        )
+
+        class FakeAnalyticsRepo:
+            async def get_execution_analytics(self, **kwargs):
+                pass
+
+        use_case = GetExecutionAnalyticsUseCase(FakeAnalyticsRepo())
+
+        # top_n fuera de rango debe fallar
+        with pytest.raises(ValueError, match="top_n must be between 1 and 50"):
+            await use_case.execute(
+                architecture_id=UUID("550e8400-e29b-41d4-a716-446655440000"),
+                top_n=51,
+            )
+
