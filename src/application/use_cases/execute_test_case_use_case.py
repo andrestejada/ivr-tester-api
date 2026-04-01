@@ -7,7 +7,7 @@ from difflib import SequenceMatcher
 import re
 from time import time
 from uuid import UUID
-from typing import Callable
+from typing import Callable, Optional
 import unicodedata
 
 from sqlalchemy.exc import PendingRollbackError
@@ -308,6 +308,18 @@ class ExecuteTestCaseUseCase:
                 logger.error(f"ASR: Falló conexión persistente antes de ejecutar pasos: {e}")
                 raise
 
+            # 2b. Lanzar monitor de inactividad de audio en background
+            monitor_task: Optional[asyncio.Task] = None
+            try:
+                monitor_task = asyncio.create_task(
+                    self._monitor_audio_inactivity(
+                        call_sid=call_session.call_sid,
+                    )
+                )
+                logger.debug(f"Audio inactivity monitor started for call {call_session.call_sid}")
+            except Exception as e:
+                logger.warning(f"Failed to start audio inactivity monitor: {e}")
+
             # 3. Procesar flujo con máquina de estados
             all_passed, full_call_transcript = await self._process_flow_with_state_machine(
                 execution_id=execution.id,
@@ -315,6 +327,14 @@ class ExecuteTestCaseUseCase:
                 flow_script=test_case.flow_script,
                 execution_log_repo=execution_log_repo,
             )
+            
+            # 3b. Detener monitor de audio
+            if monitor_task:
+                monitor_task.cancel()
+                try:
+                    await monitor_task
+                except asyncio.CancelledError:
+                    pass
             
             # 4. Guardar transcript completo en BD
             try:
@@ -1145,6 +1165,66 @@ class ExecuteTestCaseUseCase:
             await self.event_hub.publish(step_failed_event)
         except Exception as e:
             logger.debug(f"Error emitiendo evento step_failed: {e}")
+
+    async def _monitor_audio_inactivity(self, call_sid: str) -> None:
+        """Monitor de inactividad de audio que reconecta ASR si deja de llegar audio.
+        
+        Se ejecuta en paralelo durante todo el flujo. Si no hay audio chunks
+        por más de 5 segundos, intenta reconectar ASR automáticamente.
+        
+        Args:
+            call_sid: ID de la llamada a monitorear
+        """
+        AUDIO_INACTIVITY_THRESHOLD = 5.0  # segundos
+        CHECK_INTERVAL = 1.0  # chequear cada segundo
+        
+        try:
+            while True:
+                await asyncio.sleep(CHECK_INTERVAL)
+                
+                # Obtener cuánto tiempo ha pasado sin audio
+                seconds_since_audio = await self.call_session_store.get_seconds_since_last_audio(call_sid)
+                
+                if seconds_since_audio is None:
+                    # Sesión no existe, terminar monitor
+                    logger.debug(f"Audio monitor: Sesión {call_sid} no existe, terminando monitor")
+                    break
+                
+                # Si han pasado más de 5 segundos sin audio, reconectar ASR
+                if seconds_since_audio > AUDIO_INACTIVITY_THRESHOLD:
+                    is_connected = getattr(self.asr_provider, "_is_connected", False)
+                    if is_connected:
+                        logger.warning(
+                            f"Audio monitor: No hay audio por {seconds_since_audio:.1f}s "
+                            f"(threshold={AUDIO_INACTIVITY_THRESHOLD}s). Reconectando ASR..."
+                        )
+                        
+                        try:
+                            # Desconectar la conexión vieja
+                            await self.asr_provider.disconnect()
+                            await asyncio.sleep(0.5)  # Pequeña pausa
+                            
+                            # Reconectar ASR
+                            await self.asr_provider.connect(
+                                encoding="mulaw",
+                                sample_rate=8000,
+                                endpointing=int(SILENCE_THRESHOLD_SECONDS * 1000),
+                            )
+                            logger.info(f"Audio monitor: ✅ ASR reconectado exitosamente")
+                            
+                            # Reset el timestamp de último audio
+                            session = await self.call_session_store.get_session(call_sid)
+                            if session:
+                                session.last_audio_timestamp = datetime.now(timezone.utc)
+                        
+                        except Exception as e:
+                            logger.error(f"Audio monitor: ✗ Error reconectando ASR: {e}")
+                            # Continuar intentando en la siguiente iteración
+        
+        except asyncio.CancelledError:
+            logger.debug(f"Audio monitor: Detenido para llamada {call_sid}")
+        except Exception as e:
+            logger.error(f"Audio monitor: Error inesperado: {e}", exc_info=True)
 
     async def _finalize_execution(
         self,

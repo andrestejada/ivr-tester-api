@@ -16,6 +16,7 @@ class CallSessionEntity:
     call_sid: str
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     is_active: bool = field(default=True)
+    last_audio_timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def __post_init__(self) -> None:
         """Validaciones de invariantes."""

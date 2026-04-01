@@ -1,6 +1,7 @@
 """Thread-safe store for active call sessions and their audio queues."""
 
 import asyncio
+from datetime import datetime, timezone
 from typing import Optional
 import logging
 
@@ -70,6 +71,23 @@ class CallSessionStore:
             session = self._sessions.get(call_sid)
             return session.is_active if session else False
 
+    async def get_seconds_since_last_audio(self, call_sid: str) -> Optional[float]:
+        """Obtiene los segundos desde el último audio recibido.
+        
+        Args:
+            call_sid: ID de la llamada
+            
+        Returns:
+            Segundos desde el último audio, None si sesión no existe
+        """
+        async with self._lock:
+            session = self._sessions.get(call_sid)
+            if not session:
+                return None
+            
+            elapsed = (datetime.now(timezone.utc) - session.last_audio_timestamp).total_seconds()
+            return elapsed
+
     async def enqueue_audio(self, call_sid: str, audio_bytes: bytes) -> bool:
         """Encola audio recibido por WebSocket.
         
@@ -81,10 +99,15 @@ class CallSessionStore:
             True si se encoló exitosamente, False si sesión no existe
         """
         async with self._lock:
+            session = self._sessions.get(call_sid)
             queue = self._queues.get(call_sid)
             if not queue:
                 logger.debug(f"Queue not found for call_sid: {call_sid}")
                 return False
+            
+            # Actualizar timestamp del último audio
+            if session:
+                session.last_audio_timestamp = datetime.now(timezone.utc)
         
         # Enqueue fuera del lock para no bloquear
         await queue.put(audio_bytes)
