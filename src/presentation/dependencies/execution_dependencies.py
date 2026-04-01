@@ -8,6 +8,7 @@ from src.domain.repositories.test_case_repository import ITestCaseRepository
 from src.domain.repositories.test_execution_repository import ITestExecutionRepository
 from src.domain.repositories.execution_log_repository import IExecutionLogRepository
 from src.infrastructure.call_session_store import get_call_session_store
+from src.infrastructure.execution_event_hub import get_execution_event_hub, ExecutionEventHub
 from src.infrastructure.database.session import async_session_maker, get_db_session
 from src.infrastructure.database.uow import UnitOfWork
 from src.infrastructure.repositories.test_case_repository import TestCaseRepository
@@ -42,6 +43,7 @@ async def get_execute_test_case_use_case(
     test_case_repo: ITestCaseRepository = Depends(get_test_case_repo),
     test_execution_repo: ITestExecutionRepository = Depends(get_test_execution_repo),
     execution_log_repo: IExecutionLogRepository = Depends(get_execution_log_repo),
+    event_hub: ExecutionEventHub = Depends(lambda: get_execution_event_hub()),
 ) -> ExecuteTestCaseUseCase:
     """Inyecta el use case con todas sus dependencias.
     
@@ -54,5 +56,6 @@ async def get_execute_test_case_use_case(
         call_provider=TwilioCallProvider(),
         asr_provider=DeepgramASRProvider(),
         call_session_store=get_call_session_store(),
+        event_hub=event_hub,
         uow_factory=lambda: UnitOfWork(async_session_maker),
     )

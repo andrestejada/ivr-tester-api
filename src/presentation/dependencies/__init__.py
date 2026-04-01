@@ -10,6 +10,7 @@ from src.presentation.dependencies.test_execution_dependencies import (
     get_list_test_executions_use_case,
     get_test_execution_details_use_case,
     get_execution_analytics_use_case,
+    get_test_execution_repo,
 )
 
 __all__ = [
@@ -20,4 +21,5 @@ __all__ = [
     "get_list_test_executions_use_case",
     "get_test_execution_details_use_case",
     "get_execution_analytics_use_case",
+    "get_test_execution_repo",
 ]

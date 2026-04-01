@@ -9,6 +9,7 @@ from src.presentation.api.v1.test_executions import router as test_executions_ro
 from src.presentation.api.v1.analytics import router as analytics_router
 from src.presentation.api.v1.webhooks.twilio_voice import router as twilio_webhook_router
 from src.presentation.api.v1.websockets.call_stream import router as call_stream_router
+from src.presentation.api.v1.websockets.execution_stream import router as execution_stream_router
 from src.presentation.exception_handlers import register_exception_handlers
 from src.infrastructure.logger import setup_logger
 
@@ -49,5 +50,6 @@ def create_app() -> FastAPI:
     
     # WebSockets (sin prefix, rutas absolutas)
     app.include_router(call_stream_router)
+    app.include_router(execution_stream_router)
 
     return app

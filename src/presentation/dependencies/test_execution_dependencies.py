@@ -13,6 +13,7 @@ from src.infrastructure.repositories import (
     ExecutionAnalyticsRepository,
 )
 from src.infrastructure.database.session import get_db_session
+from src.domain.repositories.test_execution_repository import ITestExecutionRepository
 
 
 async def get_list_test_executions_use_case(
@@ -21,6 +22,13 @@ async def get_list_test_executions_use_case(
     """Dependency para inyectar ListTestExecutionsUseCase."""
     repository = TestExecutionRepository(session)
     return ListTestExecutionsUseCase(repository)
+
+
+async def get_test_execution_repo(
+    session: AsyncSession = Depends(get_db_session),
+) -> ITestExecutionRepository:
+    """Dependency para inyectar TestExecutionRepository."""
+    return TestExecutionRepository(session)
 
 
 async def get_test_execution_details_use_case(

@@ -17,10 +17,12 @@ from src.domain.repositories.execution_log_repository import IExecutionLogReposi
 from src.domain.repositories.test_case_repository import ITestCaseRepository
 from src.domain.repositories.test_execution_repository import ITestExecutionRepository
 from src.application.exceptions import NotFoundError
+from src.application.dtos.realtime_events import ExecutionEvent
 from src.application.services.ivr_state_machine import IVRStateMachine, SILENCE_THRESHOLD_SECONDS
 from src.infrastructure.call_session_store import CallSessionStore
 from src.infrastructure.database.uow import UnitOfWork
 from src.infrastructure.logger import get_logger
+from src.infrastructure.execution_event_hub import ExecutionEventHub
 
 logger = get_logger(__name__)
 
@@ -41,6 +43,7 @@ class ExecuteTestCaseUseCase:
         call_provider: ICallProvider,
         asr_provider: IASRProvider,
         call_session_store: CallSessionStore,
+        event_hub: ExecutionEventHub,
         uow_factory: Callable[[], UnitOfWork] | None = None,
     ) -> None:
         """Inicializa el use case con dependencias.
@@ -52,6 +55,7 @@ class ExecuteTestCaseUseCase:
             call_provider: Proveedor de telefonía (Twilio)
             asr_provider: Proveedor de transcripción (Deepgram, etc)
             call_session_store: Store de sesiones activas
+            event_hub: Hub para publicar eventos en tiempo real
             uow_factory: Factory para UnitOfWork en background
         """
         self.test_case_repo = test_case_repo
@@ -60,6 +64,7 @@ class ExecuteTestCaseUseCase:
         self.call_provider = call_provider
         self.asr_provider = asr_provider
         self.call_session_store = call_session_store
+        self.event_hub = event_hub
         self.uow_factory = uow_factory
 
     async def execute(
@@ -85,6 +90,13 @@ class ExecuteTestCaseUseCase:
             provider_call_sid=None,
         )
         logger.info(f"Execution created: {execution.id}")
+
+        # Emitir evento de inicio
+        try:
+            start_event = ExecutionEvent.execution_started(execution.id)
+            await self.event_hub.publish(start_event)
+        except Exception as e:
+            logger.error(f"Error publicando execution_started: {e}")
 
         # 3. Lanzar orquestación pesada en background
         asyncio.create_task(
@@ -295,6 +307,16 @@ class ExecuteTestCaseUseCase:
         async def _on_transcript(text: str, is_final: bool, speech_final: bool = False) -> None:
             """Callback invocado por Deepgram cuando llega texto."""
             state_machine.accumulate_transcript_text(text, is_final, speech_final)
+            
+            # Emitir eventos de transcripción en tiempo real
+            try:
+                if is_final:
+                    transcript_event = ExecutionEvent.transcript_final(execution_id, text)
+                else:
+                    transcript_event = ExecutionEvent.transcript_partial(execution_id, text)
+                await self.event_hub.publish(transcript_event)
+            except Exception as e:
+                logger.debug(f"Error emitiendo evento de transcripción: {e}")
         
         try:
             await self.asr_provider.set_transcript_handler(_on_transcript)
@@ -332,6 +354,18 @@ class ExecuteTestCaseUseCase:
                         f"Step {step_number}: ✓ MATCH DETECTED | matched_text='{match_result.matched_text}' | "
                         f"confidence={match_result.confidence}% | action={match_result.action_to_execute or 'None'}"
                     )
+                    
+                    # Emitir evento de step matched
+                    try:
+                        step_matched_event = ExecutionEvent.step_matched(
+                            execution_id,
+                            step_number,
+                            match_result.matched_text,
+                            float(match_result.confidence),
+                        )
+                        await self.event_hub.publish(step_matched_event)
+                    except Exception as e:
+                        logger.debug(f"Error emitiendo evento de step_matched: {e}")
                     
                     # 3b1. Ejecutar acción (DTMF) si aplica
                     if match_result.action_to_execute:
@@ -847,8 +881,31 @@ class ExecuteTestCaseUseCase:
                 duration_seconds=duration,
             )
             logger.info(f"FINALIZE EXECUTION | ✓ Status updated in DB | status={final_status}")
+            
+            # Emitir evento de finalización
+            try:
+                finish_event = ExecutionEvent.execution_finished(
+                    execution_id,
+                    final_status,
+                    duration,
+                )
+                await self.event_hub.publish(finish_event)
+            except Exception as e:
+                logger.error(f"FINALIZE EXECUTION | Error publicando execution_finished: {e}")
+                
         except Exception as e:
             logger.error(f"FINALIZE EXECUTION | ✗ Failed to update status | error={str(e)}", exc_info=True)
+            
+            # Emitir evento de error
+            try:
+                error_event = ExecutionEvent.execution_error(
+                    execution_id,
+                    str(e),
+                    duration,
+                )
+                await self.event_hub.publish(error_event)
+            except Exception as e2:
+                logger.error(f"FINALIZE EXECUTION | Error publicando execution_error: {e2}")
         
         try:
             await self.call_provider.hangup(call_sid)
