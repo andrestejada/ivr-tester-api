@@ -18,7 +18,11 @@ from src.domain.repositories.test_case_repository import ITestCaseRepository
 from src.domain.repositories.test_execution_repository import ITestExecutionRepository
 from src.application.exceptions import NotFoundError
 from src.application.dtos.realtime_events import ExecutionEvent
-from src.application.services.ivr_state_machine import IVRStateMachine, SILENCE_THRESHOLD_SECONDS
+from src.application.services.ivr_state_machine import (
+    IVRStateMachine,
+    SILENCE_THRESHOLD_SECONDS,
+    STEP_TIMEOUT_SECONDS,
+)
 from src.infrastructure.call_session_store import CallSessionStore
 from src.infrastructure.database.uow import UnitOfWork
 from src.infrastructure.logger import get_logger
@@ -324,6 +328,24 @@ class ExecuteTestCaseUseCase:
         except Exception as e:
             logger.error(f"ASR: Error registrando handler: {e}")
             return False, ""
+
+        async def _fail_current_step(
+            step_number: int,
+            expected_text: str,
+            actual_text: str | None,
+            reason: str,
+            confidence: Decimal = Decimal("0.00"),
+        ) -> None:
+            """Persist and publish a terminal step failure before aborting flow."""
+            await self._record_step_failure(
+                execution_id=execution_id,
+                step_number=step_number,
+                expected_text=expected_text,
+                actual_text=actual_text,
+                reason=reason,
+                confidence=confidence,
+                execution_log_repo=execution_log_repo,
+            )
         
         # 3. Bucle principal continuo
         all_passed = True
@@ -334,6 +356,7 @@ class ExecuteTestCaseUseCase:
                     break
                 
                 step_number = current_step.get("step", state_machine.state.current_step_index + 1)
+                expected_text = current_step.get("listen", "")
                 
                 # 3a. Obtener audio chunks y enviarlos al ASR
                 try:
@@ -344,7 +367,14 @@ class ExecuteTestCaseUseCase:
                         await self.asr_provider.send_audio(chunk)
                 except ValueError:
                     # Sesión cerrada
-                    logger.info(f"Step {step_number}: Call session ended")
+                    logger.warning(f"Step {step_number}: Call session ended before step completion")
+                    await _fail_current_step(
+                        step_number=step_number,
+                        expected_text=expected_text,
+                        actual_text=state_machine.get_full_text_buffer() or None,
+                        reason="Call session ended before completing step",
+                    )
+                    all_passed = False
                     break
                 
                 # 3b. Chequear si hay match con el step actual
@@ -374,6 +404,13 @@ class ExecuteTestCaseUseCase:
                         )
                         if has_error:
                             logger.error(f"Step {step_number}: DTMF execution failed: {action_log}")
+                            await _fail_current_step(
+                                step_number=step_number,
+                                expected_text=expected_text,
+                                actual_text=match_result.matched_text,
+                                reason=action_log,
+                                confidence=match_result.confidence,
+                            )
                             all_passed = False
                             break
                     else:
@@ -406,10 +443,29 @@ class ExecuteTestCaseUseCase:
                             f"Step {step_number}: ✗ REPETITION → No match found. "
                             f"IVR is repeating the menu. Expected: '{current_step.get('listen', '')}'"
                         )
+                        await _fail_current_step(
+                            step_number=step_number,
+                            expected_text=expected_text,
+                            actual_text=current_full_text,
+                            reason="IVR repeated menu without matching expected step",
+                        )
                         all_passed = False
                         break
+
+                # 3c2. Timeout del step actual: si no hubo match a tiempo, el flujo falla y termina.
+                if state_machine.check_step_timeout():
+                    await _fail_current_step(
+                        step_number=step_number,
+                        expected_text=expected_text,
+                        actual_text=current_full_text or None,
+                        reason=(
+                            f"Timeout waiting for expected text after {STEP_TIMEOUT_SECONDS}s"
+                        ),
+                    )
+                    all_passed = False
+                    break
                 
-                # 3c2. Chequear silencio (informativo - no interrumpe la espera)
+                # 3c3. Chequear silencio (informativo - no interrumpe la espera)
                 silence_duration = state_machine.get_silence_duration()
                 if silence_duration >= SILENCE_THRESHOLD_SECONDS and silence_duration < SILENCE_THRESHOLD_SECONDS + 0.1:
                     # Log una sola vez cuando cruza el umbral (evitar spam)
@@ -423,6 +479,13 @@ class ExecuteTestCaseUseCase:
         
         except Exception as e:
             logger.error(f"STATE MACHINE FLOW ERROR: {e}", exc_info=True)
+            all_passed = False
+
+        if all_passed and not state_machine.is_flow_complete():
+            logger.warning(
+                "Flow marked as incomplete: not all steps were validated successfully. "
+                "Forcing global FAILED status."
+            )
             all_passed = False
         
         # 4. Finalizar y obtener transcript completo
@@ -855,6 +918,39 @@ class ExecuteTestCaseUseCase:
             logger.debug(f"Step {step_number}: [DB] ✓ Execution log created and persisted")
         except Exception as e:
             logger.error(f"Step {step_number}: [DB] ✗ Failed to persist execution log | error={str(e)}", exc_info=True)
+
+    async def _record_step_failure(
+        self,
+        execution_id: UUID,
+        step_number: int,
+        expected_text: str,
+        actual_text: str | None,
+        reason: str,
+        confidence: Decimal,
+        execution_log_repo: IExecutionLogRepository,
+    ) -> None:
+        """Persist step failure details and emit realtime failure event."""
+        await self._log_step(
+            execution_id,
+            step_number,
+            expected_text,
+            actual_text,
+            confidence,
+            reason,
+            execution_log_repo=execution_log_repo,
+        )
+
+        try:
+            step_failed_event = ExecutionEvent.step_failed(
+                execution_id,
+                step_number,
+                expected_text,
+                actual_text,
+                reason,
+            )
+            await self.event_hub.publish(step_failed_event)
+        except Exception as e:
+            logger.debug(f"Error emitiendo evento step_failed: {e}")
 
     async def _finalize_execution(
         self,
