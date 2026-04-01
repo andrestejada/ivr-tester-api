@@ -83,7 +83,7 @@ class CallSessionStore:
         async with self._lock:
             queue = self._queues.get(call_sid)
             if not queue:
-                logger.warning(f"Queue not found for call_sid: {call_sid}")
+                logger.debug(f"Queue not found for call_sid: {call_sid}")
                 return False
         
         # Enqueue fuera del lock para no bloquear
@@ -160,8 +160,11 @@ class CallSessionStore:
         except asyncio.TimeoutError:
             return None
 
-    async def close_session(self, call_sid: str) -> None:
-        """Cierra y limpia una sesión.
+    async def mark_stream_closed(self, call_sid: str) -> None:
+        """Marca la sesión como inactiva sin destruir datos (para transiciones normales de stream).
+        
+        Usada cuando event=stop del Media Stream ocurre durante DTMF/rotación normal.
+        Permite que un nuevo stream se reconecte a la misma sesión sin perder cola de audio.
         
         Args:
             call_sid: ID de la llamada
@@ -170,9 +173,23 @@ class CallSessionStore:
             if call_sid in self._sessions:
                 session = self._sessions[call_sid]
                 session.is_active = False
-                logger.debug(f"Session {call_sid} closed")
+                logger.debug(f"Stream stopped for session {call_sid}, marking inactive but preserving queue")
+
+    async def close_session(self, call_sid: str) -> None:
+        """Cierra y limpia una sesión definitivamente (solo al final del flujo/hangup).
+        
+        Destruye sesión y cola. Usada al finalizar ejecución o en hangup.
+        
+        Args:
+            call_sid: ID de la llamada
+        """
+        async with self._lock:
+            if call_sid in self._sessions:
+                session = self._sessions[call_sid]
+                session.is_active = False
+                logger.debug(f"Session {call_sid} closed and cleaned up")
             
-            # Limpiar queue y session
+            # Limpiar queue y session definitivamente
             self._sessions.pop(call_sid, None)
             self._queues.pop(call_sid, None)
 

@@ -48,6 +48,8 @@ class ExecutionLogRepository(IExecutionLogRepository):
         )
         
         self.session.add(model)
+        # Flush to ensure the model is persisted without full transaction commit
+        # The transaction commit will happen at the UOW level
         await self.session.flush()
         
         logger.debug(

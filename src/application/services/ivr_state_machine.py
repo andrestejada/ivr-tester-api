@@ -29,6 +29,8 @@ EARLY_EXIT_SILENCE_SECONDS = 1.0
 STREAM_POLL_SECONDS = 0.5
 SIMILARITY_THRESHOLD = 0.80  # 80% - evaluación final
 EARLY_EXIT_THRESHOLD = 0.85  # 85% - early exit trigger
+EXTREME_SILENCE_THRESHOLD_SECONDS = 15.0  # Cortar llamada si >15s sin audio/transcripción
+GRACE_PERIOD_AFTER_DTMF_SECONDS = 4.0  # No contar silencio durante 4s post-DTMF
 
 
 @dataclass
@@ -214,10 +216,11 @@ class IVRStateMachine:
         
         if cached_result is not None:
             ratio, confidence, is_match = cached_result
-            logger.debug(
-                f"Step {step_number}: Cache HIT | expected='{expected_text}' | "
-                f"confidence={confidence}% | hit_rate={self.get_cache_stats()['hit_rate_percent']}%"
-            )
+            # Only log cache hit when we have a match to reduce noise
+            if is_match:
+                logger.debug(
+                    f"Step {step_number}: ✓ Cache HIT (Match found) | expected='{expected_text}' | confidence={confidence}%"
+                )
         else:
             # Evaluamos con umbral de early exit
             ratio, confidence, is_match = self.evaluate_transcription_fn(
@@ -255,6 +258,19 @@ class IVRStateMachine:
             logger.warning(
                 f"Step {step_number}: ✗ TIMEOUT EXCEEDED ({elapsed:.1f}s >= {STEP_TIMEOUT_SECONDS}s). "
                 f"Expected text: '{current_step.get('listen') if current_step else '?'}'"
+            )
+            return True
+        return False
+    
+    def check_extreme_silence_timeout(self) -> bool:
+        """¿Se excedió el silencio extremo (>10s sin audio/transcripción)?"""
+        silence_duration = self.get_silence_duration()
+        if silence_duration >= EXTREME_SILENCE_THRESHOLD_SECONDS:
+            current_step = self.get_current_step()
+            step_number = current_step.get("step") if current_step else self.state.current_step_index + 1
+            logger.critical(
+                f"Step {step_number}: ✗ EXTREME SILENCE TIMEOUT ({silence_duration:.1f}s >= {EXTREME_SILENCE_THRESHOLD_SECONDS}s). "
+                f"Caller is unresponsive."
             )
             return True
         return False

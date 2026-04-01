@@ -75,16 +75,16 @@ async def call_stream_websocket(websocket: WebSocket, call_sid: str) -> None:
                         # Encolar audio silenciosamente
                         enqueued = await store.enqueue_audio(call_sid, audio_bytes)
                         if not enqueued:
-                            logger.warning(
-                                f"Failed to enqueue audio for {call_sid}"
+                            logger.debug(
+                                f"Failed to enqueue audio for {call_sid} (session may have ended)"
                             )
                 except Exception as e:
                     logger.error(f"Error processing audio: {e}")
             
             elif event == "stop":
                 logger.info(f"Stream stopped for call {call_sid}")
-                # Cerrar sesión
-                await store.close_session(call_sid)
+                # Marcar stream como cerrado (transición normal, permitir reconexión)
+                await store.mark_stream_closed(call_sid)
                 break
             
             else:
@@ -92,12 +92,15 @@ async def call_stream_websocket(websocket: WebSocket, call_sid: str) -> None:
     
     except WebSocketDisconnect:
         logger.info(f"WebSocket disconnected for call {call_sid}")
-        await store.close_session(call_sid)
+        # Marcar inactivo, pero no destruir (permitir que otro stream se reconecte)
+        await store.mark_stream_closed(call_sid)
     
     except Exception as e:
         logger.error(f"Error in WebSocket handler: {e}", exc_info=True)
-        await store.close_session(call_sid)
+        # Marcar inactivo, no destruir
+        await store.mark_stream_closed(call_sid)
     
     finally:
-        # Asegurar que la sesión se cierra
-        await store.close_session(call_sid)
+        # No llamar close_session aquí - solo marcar inactivo
+        # La sesión se limpiará explícitamente en _finalize_execution
+        logger.debug(f"WebSocket handler cleanup for {call_sid} - session marked inactive but preserved")

@@ -4,9 +4,13 @@ import asyncio
 from datetime import datetime, timezone
 from decimal import Decimal
 from difflib import SequenceMatcher
+import re
 from time import time
 from uuid import UUID
 from typing import Callable
+import unicodedata
+
+from sqlalchemy.exc import PendingRollbackError
 
 from src.domain.entities.execution_log import ExecutionLogEntity
 from src.domain.entities.test_case import TestCaseEntity
@@ -21,8 +25,13 @@ from src.application.dtos.realtime_events import ExecutionEvent
 from src.application.services.ivr_state_machine import (
     IVRStateMachine,
     SILENCE_THRESHOLD_SECONDS,
-    STEP_TIMEOUT_SECONDS,
+    EXTREME_SILENCE_THRESHOLD_SECONDS,
+    GRACE_PERIOD_AFTER_DTMF_SECONDS,
+    SIMILARITY_THRESHOLD,
+    EARLY_EXIT_THRESHOLD,
+    EARLY_EXIT_SILENCE_SECONDS,
 )
+from src.application.utils.error_utils import sanitize_error_message
 from src.infrastructure.call_session_store import CallSessionStore
 from src.infrastructure.database.uow import UnitOfWork
 from src.infrastructure.logger import get_logger
@@ -34,6 +43,15 @@ logger = get_logger(__name__)
 AUDIO_TIMEOUT_SECONDS = 30.0
 STREAM_POLL_SECONDS = 0.5
 REPETITION_THRESHOLD = 0.50  # 50% - similitud para detectar si el IVR está repitiendo el menú
+
+# Stopwords comunes para robustecer similitud ante variaciones ASR en frases largas.
+SIMILARITY_STOPWORDS = {
+    "a", "al", "ante", "bajo", "con", "contra", "de", "del", "desde", "durante",
+    "e", "el", "ella", "ellas", "ellos", "en", "entre", "era", "es", "esa", "ese",
+    "esta", "este", "esto", "ha", "hasta", "la", "las", "le", "les", "lo", "los",
+    "mas", "mi", "no", "o", "para", "pero", "por", "que", "se", "ser", "si",
+    "sin", "su", "sus", "te", "tu", "un", "una", "uno", "y",
+}
 
 
 class ExecuteTestCaseUseCase:
@@ -137,16 +155,60 @@ class ExecuteTestCaseUseCase:
             )
             return
 
-        async with self.uow_factory() as uow:
-            await self._process_call_background_with_repos(
-                execution=execution,
-                test_case=test_case,
-                phone_number=phone_number,
-                webhook_url=webhook_url,
-                test_execution_repo=uow.test_execution_repo,
-                execution_log_repo=uow.execution_log_repo,
-                start_time=start_time,
+        try:
+            async with self.uow_factory() as uow:
+                await self._process_call_background_with_repos(
+                    execution=execution,
+                    test_case=test_case,
+                    phone_number=phone_number,
+                    webhook_url=webhook_url,
+                    test_execution_repo=uow.test_execution_repo,
+                    execution_log_repo=uow.execution_log_repo,
+                    start_time=start_time,
+                )
+        except PendingRollbackError as e:
+            logger.error(
+                f"PendingRollbackError in background task for execution {execution.id}: {sanitize_error_message(e)}"
             )
+            # Session rolled back → use a fresh session to force status update to FAILED
+            try:
+                async with self.uow_factory() as uow:
+                    duration_seconds = int(time() - start_time)
+                    await uow.test_execution_repo.update_status(
+                        execution.id,
+                        status="FAILED",
+                        duration_seconds=duration_seconds,
+                    )
+                    await uow.commit()
+                    logger.info(
+                        f"[Recovery] Forced execution {execution.id} status to FAILED after PendingRollbackError"
+                    )
+            except Exception as recovery_err:
+                logger.error(
+                    f"Failed to recover execution {execution.id} status after PendingRollbackError: {recovery_err}"
+                )
+        except Exception as e:
+            logger.error(
+                f"Unhandled exception in background task for execution {execution.id}: {sanitize_error_message(e)}",
+                exc_info=True
+            )
+            # ✅ Force status update to capture any unhandled background exceptions
+            try:
+                async with self.uow_factory() as uow:
+                    duration_seconds = int(time() - start_time)
+                    await uow.test_execution_repo.update_status(
+                        execution.id,
+                        status="ERROR",
+                        duration_seconds=duration_seconds,
+                    )
+                    await uow.commit()
+                    logger.info(
+                        f"[Recovery] Forced execution {execution.id} status to ERROR after unhandled exception"
+                    )
+            except Exception as recovery_err:
+                logger.error(
+                    f"Failed to recover execution {execution.id} status after unhandled exception: {recovery_err}"
+                )
 
     async def _process_call_background_with_repos(
         self,
@@ -179,6 +241,20 @@ class ExecuteTestCaseUseCase:
                     status="ERROR",
                     duration_seconds=duration,
                 )
+                
+                # ✅ Emitir evento de error al WebSocket
+                try:
+                    error_event = ExecutionEvent.execution_error(
+                        execution.id,
+                        f"Call initiation failed: {str(e)}",
+                        duration,
+                    )
+                    await self.event_hub.publish(error_event)
+                    logger.info(f"✓ execution_error event emitted for call initiation failure")
+                    await asyncio.sleep(0.1)
+                except Exception as e_hub:
+                    logger.error(f"Could not emit execution_error event after call initiation failure: {e_hub}")
+                    
             except Exception as e2:
                 logger.error(
                     f"Failed to update execution {execution.id} status to ERROR after initiate_call failure: {e2}"
@@ -264,15 +340,30 @@ class ExecuteTestCaseUseCase:
 
         except Exception as e:
             logger.error(f"Execution error general: {e}", exc_info=True)
-            # Intentamos actualizar estado en caso de error no controlado
+            duration = int(time() - start_time)
+            
+            # Actualizar estado en BD
             try:
                 await test_execution_repo.update_status(
                     execution.id,
                     status="ERROR",
-                    duration_seconds=int(time() - start_time),
+                    duration_seconds=duration,
                 )
             except Exception as e2:
                 logger.error(f"Could not update status after background error: {e2}")
+            
+            # ✅ IMPORTANTE: Emitir evento de error al WebSocket para que el frontend se desbloquee
+            try:
+                error_event = ExecutionEvent.execution_error(
+                    execution.id,
+                    str(e),
+                    duration,
+                )
+                await self.event_hub.publish(error_event)
+                logger.info(f"✓ execution_error event emitted to WebSocket for execution {execution.id}")
+                await asyncio.sleep(0.1)  # Dar tiempo para que se entregue
+            except Exception as e2:
+                logger.error(f"Could not emit execution_error event: {e2}")
 
         finally:
             if asr_connected:
@@ -349,6 +440,8 @@ class ExecuteTestCaseUseCase:
         
         # 3. Bucle principal continuo
         all_passed = True
+        last_dtmf_timestamp: float | None = None  # Track timestamp del último DTMF enviado
+        grace_period_logged: bool = False  # Track si ya logeamos entrada a grace period
         try:
             while not state_machine.is_flow_complete():
                 current_step = state_machine.get_current_step()
@@ -402,6 +495,10 @@ class ExecuteTestCaseUseCase:
                         action_log, has_error = await self._execute_action(
                             call_sid, match_result.action_to_execute, step_number
                         )
+                        if not has_error:
+                            # Registrar timestamp de DTMF para grace period
+                            last_dtmf_timestamp = time()
+                            grace_period_logged = False  # Reset para loguear la próxima entrada a grace period
                         if has_error:
                             logger.error(f"Step {step_number}: DTMF execution failed: {action_log}")
                             await _fail_current_step(
@@ -452,16 +549,49 @@ class ExecuteTestCaseUseCase:
                         all_passed = False
                         break
 
-                # 3c2. Timeout del step actual: si no hubo match a tiempo, el flujo falla y termina.
-                if state_machine.check_step_timeout():
+                
+                # 3c2. EXTREME SILENCE CHECK - Cortar llamada si >15s sin audio/transcripción
+                # Pero respetar grace period de 4s post-DTMF para transiciones normales
+                silence_duration = state_machine.get_silence_duration()
+                in_grace_period = False
+                if last_dtmf_timestamp is not None:
+                    time_since_dtmf = time() - last_dtmf_timestamp
+                    if time_since_dtmf < GRACE_PERIOD_AFTER_DTMF_SECONDS:
+                        in_grace_period = True
+                        # Log solo una vez cuando se ENTRA al grace period, no en cada iteración
+                        if not grace_period_logged:
+                            logger.debug(
+                                f"Step {step_number}: ✓ Grace period started (post-DTMF immunity: {GRACE_PERIOD_AFTER_DTMF_SECONDS}s)"
+                            )
+                            grace_period_logged = True
+                    else:
+                        # Grace period finalizó
+                        if grace_period_logged:
+                            logger.debug(
+                                f"Step {step_number}: Grace period expired ({time_since_dtmf:.1f}s elapsed)"
+                            )
+                            grace_period_logged = False
+                
+                if not in_grace_period and state_machine.check_extreme_silence_timeout():
+                    # Silencio extremo detectado - FAIL FAST y colgar
+                    logger.critical(
+                        f"Step {step_number}: ✗ EXTREME SILENCE ({silence_duration:.1f}s >= {EXTREME_SILENCE_THRESHOLD_SECONDS}s) - "
+                        f"Terminating execution and call"
+                    )
                     await _fail_current_step(
                         step_number=step_number,
                         expected_text=expected_text,
                         actual_text=current_full_text or None,
-                        reason=(
-                            f"Timeout waiting for expected text after {STEP_TIMEOUT_SECONDS}s"
-                        ),
+                        reason=f"Extreme caller silence: {silence_duration:.1f}s (threshold: {EXTREME_SILENCE_THRESHOLD_SECONDS}s)",
                     )
+                    
+                    # Intentar colgar la llamada de inmediato
+                    try:
+                        await self.call_provider.hangup(call_sid)
+                        logger.info(f"Step {step_number}: ✓ Call hung up due to extreme silence")
+                    except Exception as hangup_err:
+                        logger.warning(f"Step {step_number}: Could not hangup during extreme silence: {hangup_err}")
+                    
                     all_passed = False
                     break
                 
@@ -652,7 +782,7 @@ class ExecuteTestCaseUseCase:
                 await self.asr_provider.connect(
                     encoding="mulaw",
                     sample_rate=8000,
-                    endpointing=int(SILENCE_TIMEOUT_SECONDS * 1000),
+                    endpointing=int(SILENCE_THRESHOLD_SECONDS * 1000),
                 )
                 asr_connect_elapsed = time() - asr_connect_start
                 logger.debug(f"Step {step_number}: [ASR] ✓ Connected in {asr_connect_elapsed:.3f}s")
@@ -738,9 +868,9 @@ class ExecuteTestCaseUseCase:
                     # 2. === SILENCE TIMEOUT NORMAL ===
                     # Si pasaron muchos segundos desde el último fragmento de TEXTO, asumimos que hubo silencio
                     # absoluto largo o la persona dejó de hablar (Fallback de seguridad).
-                    if time_since_last_text >= SILENCE_TIMEOUT_SECONDS + 3.0:
+                    if time_since_last_text >= SILENCE_THRESHOLD_SECONDS + 3.0:
                         logger.debug(
-                            f"Step {step_number}: [ASR] timeout de silence absoluto ({SILENCE_TIMEOUT_SECONDS + 3.0}s) tras texto de deepgram, finalizando step"
+                            f"Step {step_number}: [ASR] timeout de silence absoluto ({SILENCE_THRESHOLD_SECONDS + 3.0}s) tras texto de deepgram, finalizando step"
                         )
                         break
 
@@ -795,47 +925,111 @@ class ExecuteTestCaseUseCase:
         """
         if threshold is None:
             threshold = SIMILARITY_THRESHOLD
-            
-        exp_lower = expected_text.lower()
-        trans_lower = transcription.lower()
+
+        exp_normalized = self._normalize_similarity_text(expected_text)
+        trans_normalized = self._normalize_similarity_text(transcription)
+
+        if not exp_normalized or not trans_normalized:
+            return 0.0, Decimal("0.00"), False
         
         # === FAST PATH 1: Exact substring match ===
-        if exp_lower in trans_lower:
+        if exp_normalized in trans_normalized:
             logger.debug(f"_evaluate_transcription: EXACT MATCH found. Expected: '{expected_text}' (len={len(expected_text)}) in Transcription: '{transcription}' (len={len(transcription)})")
             return 1.0, Decimal("100.00"), True
         
         # === SLIDING WINDOW APPROACH ===
-        # Dividir en palabras para una ventana semántica
-        words_exp = exp_lower.split()
-        words_trans = trans_lower.split()
+        # Dividir en tokens normalizados para tolerar mejor ruido ASR y puntuación.
+        words_exp = self._tokenize_for_similarity(expected_text)
+        words_trans = self._tokenize_for_similarity(transcription)
         window_size = len(words_exp)
+
+        if not words_exp or not words_trans:
+            fallback_ratio = SequenceMatcher(None, exp_normalized, trans_normalized, autojunk=False).ratio()
+            confidence = Decimal(str(fallback_ratio * 100)).quantize(Decimal("0.01"))
+            return fallback_ratio, confidence, fallback_ratio >= threshold
         
         logger.debug(f"_evaluate_transcription: Using Sliding Window. Expected words={words_exp} (count={window_size}), Transcription words={words_trans} (count={len(words_trans)})")
         
-        best_ratio = 0.0
+        # Coverage global: mide qué tanto del expected aparece en orden, aunque haya texto extra.
+        best_ratio = self._ordered_token_coverage(words_exp, words_trans)
         best_window_idx = -1
+        best_metric = "global_ordered_coverage"
         
         # Slide over chunks of the closest size to expected_text
         if len(words_trans) >= window_size and window_size > 0:
             for i in range(len(words_trans) - window_size + 1):
-                window_text = " ".join(words_trans[i:i + window_size])
-                ratio = SequenceMatcher(None, exp_lower, window_text).ratio()
-                logger.debug(f"  Window[{i}]: '{window_text}' -> ratio={ratio:.2%}")
+                window_tokens = words_trans[i:i + window_size]
+                window_text = " ".join(window_tokens)
+
+                char_ratio = SequenceMatcher(None, exp_normalized, window_text, autojunk=False).ratio()
+                token_ratio = SequenceMatcher(None, words_exp, window_tokens, autojunk=False).ratio()
+                coverage_ratio = self._ordered_token_coverage(words_exp, window_tokens)
+                ratio = max(char_ratio, token_ratio, coverage_ratio)
+
+                logger.debug(
+                    f"  Window[{i}]: ratio={ratio:.2%} "
+                    f"(char={char_ratio:.2%}, token={token_ratio:.2%}, coverage={coverage_ratio:.2%})"
+                )
                 if ratio > best_ratio:
                     best_ratio = ratio
                     best_window_idx = i
+                    if ratio == coverage_ratio:
+                        best_metric = "window_ordered_coverage"
+                    elif ratio == token_ratio:
+                        best_metric = "window_token_ratio"
+                    else:
+                        best_metric = "window_char_ratio"
         else:
             # Fallback if transcription is shorter than expected: full comparison
             logger.debug(f"_evaluate_transcription: Transcription shorter than expected, using full comparison fallback")
-            best_ratio = SequenceMatcher(None, exp_lower, trans_lower).ratio()
-            logger.debug(f"  Full comparison ratio={best_ratio:.2%}")
+            full_char_ratio = SequenceMatcher(None, exp_normalized, trans_normalized, autojunk=False).ratio()
+            full_token_ratio = SequenceMatcher(None, words_exp, words_trans, autojunk=False).ratio()
+            full_coverage_ratio = self._ordered_token_coverage(words_exp, words_trans)
+            best_ratio = max(full_char_ratio, full_token_ratio, full_coverage_ratio, best_ratio)
+            best_metric = "full_fallback"
+            logger.debug(
+                f"  Full comparison ratio={best_ratio:.2%} "
+                f"(char={full_char_ratio:.2%}, token={full_token_ratio:.2%}, coverage={full_coverage_ratio:.2%})"
+            )
         
         confidence = Decimal(str(best_ratio * 100)).quantize(Decimal("0.01"))
         is_match = best_ratio >= threshold
         
-        logger.debug(f"_evaluate_transcription: FINAL RESULT - best_ratio={best_ratio:.2%}, confidence={confidence}, is_match={is_match}, threshold={threshold:.0%}")
+        logger.debug(
+            f"_evaluate_transcription: FINAL RESULT - best_ratio={best_ratio:.2%}, confidence={confidence}, "
+            f"is_match={is_match}, threshold={threshold:.0%}, metric={best_metric}, best_window={best_window_idx}"
+        )
         
         return best_ratio, confidence, is_match
+
+    def _normalize_similarity_text(self, text: str) -> str:
+        """Normalize text for resilient ASR similarity comparison."""
+        lowered = text.lower()
+        normalized = unicodedata.normalize("NFKD", lowered)
+        without_accents = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+        cleaned = re.sub(r"[^a-z0-9\s]", " ", without_accents)
+        return re.sub(r"\s+", " ", cleaned).strip()
+
+    def _tokenize_for_similarity(self, text: str) -> list[str]:
+        """Tokenize normalized text and remove common stopwords."""
+        normalized = self._normalize_similarity_text(text)
+        if not normalized:
+            return []
+        return [token for token in normalized.split() if token not in SIMILARITY_STOPWORDS]
+
+    def _ordered_token_coverage(self, expected_tokens: list[str], candidate_tokens: list[str]) -> float:
+        """Compute ordered coverage: how much expected appears in order within candidate."""
+        if not expected_tokens or not candidate_tokens:
+            return 0.0
+
+        match_idx = 0
+        for token in candidate_tokens:
+            if match_idx >= len(expected_tokens):
+                break
+            if token == expected_tokens[match_idx]:
+                match_idx += 1
+
+        return match_idx / len(expected_tokens)
 
     async def _execute_action(self, call_sid: str, action: str | None, step_number: int) -> tuple[str, bool]:
         """Ejecuta una acción como enviar DTMF. Retorna (log_accion, hay_error).
@@ -883,7 +1077,7 @@ class ExecuteTestCaseUseCase:
             logger.error(f"Step {step_number}: [DTMF] | error: {str(e)}")
             logger.error(f"Step {step_number}: [DTMF] | timestamp: {datetime.now(timezone.utc).isoformat()}")
             logger.error(f"Step {step_number}: [DTMF] ═══════════════════════════════════════════════════════════════")
-            return f"DTMF error: {str(e)[:255]}", True
+            return f"DTMF error: {sanitize_error_message(e)}", True
 
     async def _log_step(
         self,
@@ -986,6 +1180,8 @@ class ExecuteTestCaseUseCase:
                     duration,
                 )
                 await self.event_hub.publish(finish_event)
+                # Allow time for events to be delivered to subscribers
+                await asyncio.sleep(0.1)
             except Exception as e:
                 logger.error(f"FINALIZE EXECUTION | Error publicando execution_finished: {e}")
                 
@@ -1000,6 +1196,8 @@ class ExecuteTestCaseUseCase:
                     duration,
                 )
                 await self.event_hub.publish(error_event)
+                # Allow time for events to be delivered to subscribers
+                await asyncio.sleep(0.1)
             except Exception as e2:
                 logger.error(f"FINALIZE EXECUTION | Error publicando execution_error: {e2}")
         
@@ -1008,4 +1206,11 @@ class ExecuteTestCaseUseCase:
             logger.info(f"FINALIZE EXECUTION | ✓ Call hung up | call_sid={call_sid}")
         except Exception as e:
             logger.warning(f"FINALIZE EXECUTION | ✗ Error hanging up call | error={str(e)}")
+        
+        # Limpiar sesión explícitamente después de hangup
+        try:
+            await self.call_session_store.close_session(call_sid)
+            logger.info(f"FINALIZE EXECUTION | ✓ Session cleaned up | call_sid={call_sid}")
+        except Exception as e:
+            logger.warning(f"FINALIZE EXECUTION | ✗ Error closing session | error={str(e)}")
 

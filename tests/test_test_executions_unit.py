@@ -193,8 +193,7 @@ class TestGetExecutionAnalyticsUseCase:
     async def test_execute_validates_date_range(self):
         """Verifica que valida rango máximo de 90 días."""
         from datetime import datetime, timedelta, timezone
-        from src.application.use_cases.get_execution_analytics_use_case import
- GetExecutionAnalyticsUseCase
+        from src.application.use_cases.get_execution_analytics_use_case import GetExecutionAnalyticsUseCase
 
         class FakeAnalyticsRepo:
             async def get_execution_analytics(self, **kwargs):

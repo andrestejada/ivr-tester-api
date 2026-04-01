@@ -3,7 +3,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DECIMAL, TEXT, VARCHAR, DateTime, ForeignKey, Integer, func
+from sqlalchemy import DECIMAL, TEXT, DateTime, ForeignKey, Integer, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -37,7 +37,7 @@ class ExecutionLogModel(Base):
         comment="Similarity/confidence percentage from Deepgram (0.00 – 100.00)",
     )
     action_taken: Mapped[str | None] = mapped_column(
-        VARCHAR(255),
+        TEXT,
         nullable=True,
         comment='e.g. "Sent DTMF: 2" or "Call terminated"',
     )
