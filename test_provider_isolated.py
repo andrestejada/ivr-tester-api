@@ -22,7 +22,7 @@ async def main():
     print("Conectando al WebSocket de Deepgram...")
     await provider.connect()
     
-    AUDIO_FILE = "test_audio.wav"
+    AUDIO_FILE = "test-audio.wav"
     print(f"Transmitiendo audio desde archivo local: {AUDIO_FILE}")
     
     try:
