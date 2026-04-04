@@ -31,7 +31,7 @@ from src.application.services.ivr_state_machine import (
     EARLY_EXIT_THRESHOLD,
     EARLY_EXIT_SILENCE_SECONDS,
 )
-from src.application.utils.error_utils import sanitize_error_message
+from src.application.utils.error_utils import sanitize_error_message, get_user_friendly_error_message
 from src.infrastructure.call_session_store import CallSessionStore
 from src.infrastructure.database.uow import UnitOfWork
 from src.infrastructure.logger import get_logger
@@ -179,7 +179,6 @@ class ExecuteTestCaseUseCase:
                         status="FAILED",
                         duration_seconds=duration_seconds,
                     )
-                    await uow.commit()
                     logger.info(
                         f"[Recovery] Forced execution {execution.id} status to FAILED after PendingRollbackError"
                     )
@@ -201,7 +200,6 @@ class ExecuteTestCaseUseCase:
                         status="ERROR",
                         duration_seconds=duration_seconds,
                     )
-                    await uow.commit()
                     logger.info(
                         f"[Recovery] Forced execution {execution.id} status to ERROR after unhandled exception"
                     )
@@ -242,11 +240,24 @@ class ExecuteTestCaseUseCase:
                     duration_seconds=duration,
                 )
                 
-                # ✅ Emitir evento de error al WebSocket
+                # ✅ Emitir evento de error al WebSocket con mensaje filtrado
                 try:
+                    # Log completo con detalle técnico para telemetry
+                    logger.error(
+                        f"Call initiation failed for execution {execution.id}",
+                        exc_info=True,
+                        extra={
+                            "execution_id": str(execution.id),
+                            "test_case_id": str(execution.test_case_id),
+                            "raw_error": str(e),
+                        }
+                    )
+                    
+                    # Emitir mensaje filtrado y amigable al WebSocket
+                    friendly_message = get_user_friendly_error_message(e)
                     error_event = ExecutionEvent.execution_error(
                         execution.id,
-                        f"Call initiation failed: {str(e)}",
+                        friendly_message,
                         duration,
                     )
                     await self.event_hub.publish(error_event)
@@ -372,11 +383,23 @@ class ExecuteTestCaseUseCase:
             except Exception as e2:
                 logger.error(f"Could not update status after background error: {e2}")
             
-            # ✅ IMPORTANTE: Emitir evento de error al WebSocket para que el frontend se desbloquee
+            # ✅ IMPORTANTE: Emitir evento de error al WebSocket con mensaje filtrado
             try:
+                # Log completo con detalle técnico para telemetry
+                logger.error(
+                    f"Background error during execution {execution.id}",
+                    exc_info=True,
+                    extra={
+                        "execution_id": str(execution.id),
+                        "raw_error": str(e),
+                    }
+                )
+                
+                # Emitir mensaje filtrado y amigable al WebSocket
+                friendly_message = get_user_friendly_error_message(e)
                 error_event = ExecutionEvent.execution_error(
                     execution.id,
-                    str(e),
+                    friendly_message,
                     duration,
                 )
                 await self.event_hub.publish(error_event)
@@ -1268,11 +1291,23 @@ class ExecuteTestCaseUseCase:
         except Exception as e:
             logger.error(f"FINALIZE EXECUTION | ✗ Failed to update status | error={str(e)}", exc_info=True)
             
-            # Emitir evento de error
+            # Emitir evento de error con mensaje filtrado
             try:
+                # Log completo con detalle técnico para telemetry
+                logger.error(
+                    f"Finalize execution error for {execution_id}",
+                    exc_info=True,
+                    extra={
+                        "execution_id": str(execution_id),
+                        "raw_error": str(e),
+                    }
+                )
+                
+                # Emitir mensaje filtrado y amigable al WebSocket
+                friendly_message = get_user_friendly_error_message(e)
                 error_event = ExecutionEvent.execution_error(
                     execution_id,
-                    str(e),
+                    friendly_message,
                     duration,
                 )
                 await self.event_hub.publish(error_event)

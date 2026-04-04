@@ -1,12 +1,33 @@
 """Twilio implementation of ICallProvider."""
 
+import asyncio
 from typing import Optional
+
+from tenacity import (
+    before_sleep_log,
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type,
+)
 
 from src.domain.ports.call_provider import ICallProvider, CallSession
 from src.infrastructure.config import settings
 from src.infrastructure.logger import get_logger
+from src.application.utils.error_utils import classify_error_category
 
 logger = get_logger(__name__)
+
+
+def _is_network_error_retryable(error: Exception) -> bool:
+    """
+    Determine if an error is a transient network error worth retrying.
+    
+    Returns True for DNS, connection, and timeout errors.
+    Returns False for auth, credential, and permanent errors.
+    """
+    error_category = classify_error_category(error)
+    return error_category in ('network', 'timeout', 'unavailable')
 
 
 class TwilioCallProvider(ICallProvider):
@@ -33,7 +54,17 @@ class TwilioCallProvider(ICallProvider):
     async def initiate_call(
         self, phone_number: str, webhook_url: str
     ) -> CallSession:
-        """Inicia una llamada via Twilio REST API.
+        """Inicia una llamada via Twilio REST API con reintentos para fallos transitorios.
+        
+        Reintentos automáticos para:
+        - Errores DNS/resolución de nombres (ej: NameResolutionError)
+        - Timeouts de conexión
+        - Fallos temporales de disponibilidad del servicio
+        
+        No reintenta para:
+        - Errores de autenticación
+        - Números inválidos
+        - Errores de configuración
         
         Args:
             phone_number: Número a marcar (ej: "+1234567890")
@@ -43,26 +74,57 @@ class TwilioCallProvider(ICallProvider):
             CallSession con call_sid asignado
             
         Raises:
-            Exception si el número es inválido, cuenta sin crédito, etc.
+            Exception si luego de 3 reintentos el error persiste o es no-reintentable
         """
-        try:
-            logger.info(f"Initiating call to {phone_number}")
-            
-            # Crear llamada via Twilio REST API
-            # Usando url webhook: Twilio descargará el TwiML cuando contesten. (Se pierden ~200-500ms).
-            call = self.client.calls.create(
-                to=phone_number,
-                from_=self.from_number,
-                url=webhook_url,
-                method="POST",
-            )
-            
-            logger.info(f"Call created with SID: {call.sid}")
-            return CallSession(call_sid=call.sid)
+        max_retries = 3
+        retry_delay = 1  # seconds
+        attempt = 0
         
-        except Exception as e:
-            logger.error(f"Error initiating call: {e}")
-            raise
+        while attempt < max_retries:
+            try:
+                attempt += 1
+                logger.info(
+                    f"Initiating call to {phone_number} (attempt {attempt}/{max_retries})"
+                )
+                
+                # Crear llamada via Twilio REST API
+                call = self.client.calls.create(
+                    to=phone_number,
+                    from_=self.from_number,
+                    url=webhook_url,
+                    method="POST",
+                )
+                
+                logger.info(f"Call created with SID: {call.sid}")
+                return CallSession(call_sid=call.sid)
+            
+            except Exception as e:
+                error_msg = str(e)
+                error_category = classify_error_category(e)
+                
+                # Log completo con stack trace para el telemetry backend
+                logger.error(
+                    f"Error initiating call (attempt {attempt}/{max_retries}): {error_msg}",
+                    exc_info=True,
+                    extra={
+                        "error_category": error_category,
+                        "phone_number": phone_number,
+                        "attempt": attempt,
+                    }
+                )
+                
+                # Si no es reintentable o es el último intento, lanzar
+                if not _is_network_error_retryable(e) or attempt >= max_retries:
+                    logger.warning(
+                        f"Call initiation failed (category={error_category}, reintentable={_is_network_error_retryable(e)}). "
+                        f"Not retrying."
+                    )
+                    raise
+                
+                # Esperar antes de reintentar con backoff exponencial
+                wait_time = retry_delay * (2 ** (attempt - 1))  # 1s, 2s, 4s
+                logger.info(f"Retrying call initiation in {wait_time}s...")
+                await asyncio.sleep(wait_time)
 
     async def send_dtmf(self, call_sid: str, digits: str) -> None:
         """Envía DTMF vía update de llamada.
