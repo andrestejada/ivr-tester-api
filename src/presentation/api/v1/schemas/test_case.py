@@ -16,3 +16,10 @@ class CreateTestCaseRequest(BaseModel):
 
     name: str = Field(..., min_length=1, max_length=255, description="Nombre del caso de prueba")
     flow_script: list[FlowStep] = Field(..., min_length=1, description="Lista de pasos del flujo")
+
+
+class UpdateTestCaseRequest(BaseModel):
+    """Schema para actualizar un Test Case existente."""
+
+    name: str | None = Field(None, min_length=1, max_length=255, description="Nuevo nombre del caso de prueba")
+    flow_script: list[FlowStep] | None = Field(None, min_length=1, description="Nueva lista de pasos del flujo")

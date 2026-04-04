@@ -35,3 +35,13 @@ class ITestCaseRepository(ABC):
     async def delete(self, test_case_id: UUID) -> None:
         """Elimina un Test Case."""
         pass
+
+    @abstractmethod
+    async def update(
+        self,
+        test_case_id: UUID,
+        name: str | None = None,
+        flow_script: list[dict] | None = None,
+    ) -> None:
+        """Actualiza un Test Case existente."""
+        pass

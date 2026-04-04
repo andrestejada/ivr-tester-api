@@ -6,6 +6,7 @@ from pydantic import ValidationError
 from src.presentation.api.v1.schemas.test_case import (
     FlowStep,
     CreateTestCaseRequest,
+    UpdateTestCaseRequest,
 )
 
 
@@ -99,3 +100,57 @@ class TestCreateTestCaseRequestSchema:
     def test_missing_flow_script(self):
         with pytest.raises(ValidationError):
             CreateTestCaseRequest(name="Test")
+
+
+class TestUpdateTestCaseRequestSchema:
+    """Tests para validación de UpdateTestCaseRequest."""
+
+    def test_valid_request_name_only(self):
+        req = UpdateTestCaseRequest(name="Nuevo nombre")
+        assert req.name == "Nuevo nombre"
+        assert req.flow_script is None
+
+    def test_valid_request_flow_script_only(self):
+        req = UpdateTestCaseRequest(
+            flow_script=[FlowStep(step=1, listen="Bienvenido", action="send_dtmf_1")]
+        )
+        assert req.name is None
+        assert len(req.flow_script) == 1
+
+    def test_valid_request_both_fields(self):
+        req = UpdateTestCaseRequest(
+            name="Nuevo nombre",
+            flow_script=[FlowStep(step=1, listen="Bienvenido")],
+        )
+        assert req.name == "Nuevo nombre"
+        assert len(req.flow_script) == 1
+
+    def test_valid_request_empty_payload(self):
+        req = UpdateTestCaseRequest()
+        assert req.name is None
+        assert req.flow_script is None
+
+    def test_name_empty_string(self):
+        with pytest.raises(ValidationError):
+            UpdateTestCaseRequest(name="")
+
+    def test_name_too_long(self):
+        with pytest.raises(ValidationError):
+            UpdateTestCaseRequest(name="x" * 256)
+
+    def test_name_max_length(self):
+        req = UpdateTestCaseRequest(name="x" * 255)
+        assert len(req.name) == 255
+
+    def test_flow_script_empty_list(self):
+        with pytest.raises(ValidationError):
+            UpdateTestCaseRequest(flow_script=[])
+
+    def test_flow_script_multiple_steps(self):
+        req = UpdateTestCaseRequest(
+            flow_script=[
+                FlowStep(step=1, listen="Bienvenido", action="send_dtmf_1"),
+                FlowStep(step=2, listen="Para ventas presione 2", action="send_dtmf_2"),
+            ],
+        )
+        assert len(req.flow_script) == 2

@@ -10,6 +10,9 @@ from src.application.use_cases.create_test_case_use_case import (
 from src.application.use_cases.list_test_cases_use_case import (
     ListTestCasesUseCase,
 )
+from src.application.use_cases.update_test_case_use_case import (
+    UpdateTestCaseUseCase,
+)
 from src.application.use_cases.list_test_executions_use_case import (
     ListTestExecutionsUseCase,
 )
@@ -25,6 +28,7 @@ __all__ = [
     "ListIVRArchitecturesUseCase",
     "CreateTestCaseUseCase",
     "ListTestCasesUseCase",
+    "UpdateTestCaseUseCase",
     "ListTestExecutionsUseCase",
     "GetTestExecutionDetailsUseCase",
     "GetExecutionAnalyticsUseCase",

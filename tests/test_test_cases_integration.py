@@ -209,3 +209,217 @@ class TestListTestCasesEndpoint:
 
                 assert response.status_code == 200
                 assert response.json() == []
+
+
+class TestUpdateTestCaseEndpoint:
+    """Tests para el endpoint PUT /ivr-architectures/{id}/test-cases/{test_case_id}."""
+
+    def test_scenario_1_update_name_successfully(self, test_client, valid_token):
+        """Escenario 1: Actualizar nombre exitosamente."""
+        with patch(
+            "src.presentation.dependencies.test_case_dependencies.get_db_session"
+        ) as mock_session_gen:
+            mock_session = AsyncMock()
+            mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_session.__aexit__ = AsyncMock(return_value=None)
+            mock_session.flush = AsyncMock()
+
+            mock_session_gen.return_value = mock_session
+
+            with patch(
+                "src.presentation.dependencies.test_case_dependencies.TestCaseRepository"
+            ) as mock_repo_class:
+                from src.domain.entities.test_case import TestCaseEntity
+                from datetime import datetime
+
+                mock_repo = AsyncMock()
+                ivr_id = "550e8400-e29b-41d4-a716-446655440000"
+                test_case_id = "550e8400-e29b-41d4-a716-446655440001"
+
+                # Mock list_by_architecture (para verificar pertenencia)
+                mock_repo.list_by_architecture = AsyncMock(
+                    return_value=[
+                        TestCaseEntity(
+                            id=UUID(test_case_id),
+                            ivr_architecture_id=UUID(ivr_id),
+                            name="Flujo antiguo",
+                            flow_script=[{"step": 1, "listen": "Bienvenido"}],
+                            created_at=datetime.now(),
+                        ),
+                    ]
+                )
+                # Mock update
+                mock_repo.update = AsyncMock()
+                mock_repo_class.return_value = mock_repo
+
+                response = test_client.put(
+                    f"/api/v1/ivr-architectures/{ivr_id}/test-cases/{test_case_id}",
+                    json={"name": "Nuevo nombre"},
+                    headers={"Authorization": f"Bearer {valid_token}"},
+                )
+
+                assert response.status_code == 204
+                mock_repo.update.assert_called_once()
+
+    def test_scenario_2_update_flow_script_successfully(self, test_client, valid_token):
+        """Escenario 2: Actualizar flow_script exitosamente."""
+        with patch(
+            "src.presentation.dependencies.test_case_dependencies.get_db_session"
+        ) as mock_session_gen:
+            mock_session = AsyncMock()
+            mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_session.__aexit__ = AsyncMock(return_value=None)
+            mock_session.flush = AsyncMock()
+
+            mock_session_gen.return_value = mock_session
+
+            with patch(
+                "src.presentation.dependencies.test_case_dependencies.TestCaseRepository"
+            ) as mock_repo_class:
+                from src.domain.entities.test_case import TestCaseEntity
+                from datetime import datetime
+
+                mock_repo = AsyncMock()
+                ivr_id = "550e8400-e29b-41d4-a716-446655440000"
+                test_case_id = "550e8400-e29b-41d4-a716-446655440001"
+
+                mock_repo.list_by_architecture = AsyncMock(
+                    return_value=[
+                        TestCaseEntity(
+                            id=UUID(test_case_id),
+                            ivr_architecture_id=UUID(ivr_id),
+                            name="Test",
+                            flow_script=[{"step": 1, "listen": "Bienvenido"}],
+                            created_at=datetime.now(),
+                        ),
+                    ]
+                )
+                mock_repo.update = AsyncMock()
+                mock_repo_class.return_value = mock_repo
+
+                response = test_client.put(
+                    f"/api/v1/ivr-architectures/{ivr_id}/test-cases/{test_case_id}",
+                    json={
+                        "flow_script": [
+                            {"step": 1, "listen": "Nuevo flujo"},
+                            {"step": 2, "listen": "Paso 2"},
+                        ]
+                    },
+                    headers={"Authorization": f"Bearer {valid_token}"},
+                )
+
+                assert response.status_code == 204
+                mock_repo.update.assert_called_once()
+
+    def test_scenario_3_update_both_fields(self, test_client, valid_token):
+        """Escenario 3: Actualizar nombre y flow_script."""
+        with patch(
+            "src.presentation.dependencies.test_case_dependencies.get_db_session"
+        ) as mock_session_gen:
+            mock_session = AsyncMock()
+            mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_session.__aexit__ = AsyncMock(return_value=None)
+            mock_session.flush = AsyncMock()
+
+            mock_session_gen.return_value = mock_session
+
+            with patch(
+                "src.presentation.dependencies.test_case_dependencies.TestCaseRepository"
+            ) as mock_repo_class:
+                from src.domain.entities.test_case import TestCaseEntity
+                from datetime import datetime
+
+                mock_repo = AsyncMock()
+                ivr_id = "550e8400-e29b-41d4-a716-446655440000"
+                test_case_id = "550e8400-e29b-41d4-a716-446655440001"
+
+                mock_repo.list_by_architecture = AsyncMock(
+                    return_value=[
+                        TestCaseEntity(
+                            id=UUID(test_case_id),
+                            ivr_architecture_id=UUID(ivr_id),
+                            name="Antiguo",
+                            flow_script=[{"step": 1, "listen": "Viejo"}],
+                            created_at=datetime.now(),
+                        ),
+                    ]
+                )
+                mock_repo.update = AsyncMock()
+                mock_repo_class.return_value = mock_repo
+
+                response = test_client.put(
+                    f"/api/v1/ivr-architectures/{ivr_id}/test-cases/{test_case_id}",
+                    json={
+                        "name": "Nuevo nombre",
+                        "flow_script": [{"step": 1, "listen": "Nuevo flujo"}],
+                    },
+                    headers={"Authorization": f"Bearer {valid_token}"},
+                )
+
+                assert response.status_code == 204
+                mock_repo.update.assert_called_once()
+
+    def test_scenario_4_test_case_not_in_architecture(self, test_client, valid_token):
+        """Escenario 4: Test case no pertenece a la arquitectura."""
+        with patch(
+            "src.presentation.dependencies.test_case_dependencies.get_db_session"
+        ) as mock_session_gen:
+            mock_session = AsyncMock()
+            mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_session.__aexit__ = AsyncMock(return_value=None)
+
+            mock_session_gen.return_value = mock_session
+
+            with patch(
+                "src.presentation.dependencies.test_case_dependencies.TestCaseRepository"
+            ) as mock_repo_class:
+                mock_repo = AsyncMock()
+                ivr_id = "550e8400-e29b-41d4-a716-446655440000"
+                test_case_id = "550e8400-e29b-41d4-a716-446655440001"
+
+                # Mock retorna lista vacía (test case no existe en esta arquitectura)
+                mock_repo.list_by_architecture = AsyncMock(return_value=[])
+                mock_repo_class.return_value = mock_repo
+
+                response = test_client.put(
+                    f"/api/v1/ivr-architectures/{ivr_id}/test-cases/{test_case_id}",
+                    json={"name": "Nuevo nombre"},
+                    headers={"Authorization": f"Bearer {valid_token}"},
+                )
+
+                assert response.status_code == 404
+
+    def test_scenario_5_missing_jwt_token(self, test_client):
+        """Escenario 5: Rechazar sin autenticación JWT."""
+        ivr_id = "550e8400-e29b-41d4-a716-446655440000"
+        test_case_id = "550e8400-e29b-41d4-a716-446655440001"
+        response = test_client.put(
+            f"/api/v1/ivr-architectures/{ivr_id}/test-cases/{test_case_id}",
+            json={"name": "Nuevo nombre"},
+        )
+
+        assert response.status_code == 401
+
+    def test_scenario_6_invalid_name_too_long(self, test_client, valid_token):
+        """Escenario 6: Validar nombre máximo 255 caracteres."""
+        ivr_id = "550e8400-e29b-41d4-a716-446655440000"
+        test_case_id = "550e8400-e29b-41d4-a716-446655440001"
+        response = test_client.put(
+            f"/api/v1/ivr-architectures/{ivr_id}/test-cases/{test_case_id}",
+            json={"name": "x" * 256},
+            headers={"Authorization": f"Bearer {valid_token}"},
+        )
+
+        assert response.status_code == 422
+
+    def test_scenario_7_invalid_flow_script_empty(self, test_client, valid_token):
+        """Escenario 7: Validar flow_script lista no vacía."""
+        ivr_id = "550e8400-e29b-41d4-a716-446655440000"
+        test_case_id = "550e8400-e29b-41d4-a716-446655440001"
+        response = test_client.put(
+            f"/api/v1/ivr-architectures/{ivr_id}/test-cases/{test_case_id}",
+            json={"flow_script": []},
+            headers={"Authorization": f"Bearer {valid_token}"},
+        )
+
+        assert response.status_code == 422

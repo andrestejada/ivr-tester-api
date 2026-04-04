@@ -3,7 +3,11 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import Depends
 
-from src.application.use_cases import CreateTestCaseUseCase, ListTestCasesUseCase
+from src.application.use_cases import (
+    CreateTestCaseUseCase,
+    ListTestCasesUseCase,
+    UpdateTestCaseUseCase,
+)
 from src.infrastructure.repositories import TestCaseRepository
 from src.infrastructure.database.session import get_db_session
 
@@ -22,3 +26,11 @@ async def get_list_test_cases_use_case(
     """Dependency para inyectar ListTestCasesUseCase."""
     repository = TestCaseRepository(session)
     return ListTestCasesUseCase(repository)
+
+
+async def get_update_test_case_use_case(
+    session: AsyncSession = Depends(get_db_session),
+) -> UpdateTestCaseUseCase:
+    """Dependency para inyectar UpdateTestCaseUseCase."""
+    repository = TestCaseRepository(session)
+    return UpdateTestCaseUseCase(repository)

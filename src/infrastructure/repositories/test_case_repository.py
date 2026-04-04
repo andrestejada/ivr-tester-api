@@ -62,6 +62,24 @@ class TestCaseRepository(ITestCaseRepository):
             raise NotFoundError(f"Test Case {test_case_id} not found")
         await self.session.delete(model)
 
+    async def update(
+        self,
+        test_case_id: UUID,
+        name: str | None = None,
+        flow_script: list[dict] | None = None,
+    ) -> None:
+        """Actualiza un Test Case existente (solo nombre y flow_script)."""
+        model = await self.session.get(TestCaseModel, test_case_id)
+        if not model:
+            raise NotFoundError(f"Test Case {test_case_id} not found")
+        
+        if name is not None:
+            model.name = name
+        if flow_script is not None:
+            model.flow_script = flow_script
+        
+        await self.session.flush()
+
     @staticmethod
     def _to_entity(model: TestCaseModel) -> TestCaseEntity:
         """Convierte un TestCaseModel a TestCaseEntity."""
