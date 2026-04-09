@@ -1,6 +1,7 @@
 import pytest
 from src.presentation.api.v1.schemas.ivr_architecture import (
     CreateIVRArchitectureRequest,
+    UpdateIVRArchitectureRequest,
 )
 from pydantic import ValidationError
 
@@ -55,3 +56,63 @@ class TestCreateIVRArchitectureRequestSchema:
                 phone_number="5551234567",
                 description="x" * 501,
             )
+
+
+class TestUpdateIVRArchitectureRequestSchema:
+    def test_valid_payload(self):
+        req = UpdateIVRArchitectureRequest(name="Updated IVR", phone_number="+12025551234")
+        assert req.name == "Updated IVR"
+        assert req.phone_number == "+12025551234"
+        assert req.description is None
+
+    def test_name_empty(self):
+        with pytest.raises(ValidationError):
+            UpdateIVRArchitectureRequest(name="", phone_number="5551234567")
+
+    def test_name_too_long(self):
+        with pytest.raises(ValidationError):
+            UpdateIVRArchitectureRequest(name="x" * 251, phone_number="5551234567")
+
+    def test_name_max_length(self):
+        req = UpdateIVRArchitectureRequest(name="x" * 250, phone_number="5551234567")
+        assert len(req.name) == 250
+
+    def test_phone_number_valid(self):
+        req = UpdateIVRArchitectureRequest(name="Sales IVR", phone_number="5551234567")
+        assert req.phone_number == "5551234567"
+
+    def test_phone_number_with_letters(self):
+        with pytest.raises(ValidationError):
+            UpdateIVRArchitectureRequest(name="Sales IVR", phone_number="555-ABC-1234")
+
+    def test_phone_number_with_plus(self):
+        req = UpdateIVRArchitectureRequest(name="Sales IVR", phone_number="+5551234567")
+        assert req.phone_number == "+5551234567"
+
+    def test_phone_number_with_spaces_and_dashes(self):
+        req = UpdateIVRArchitectureRequest(name="Sales IVR", phone_number="+555 123-4567")
+        assert req.phone_number == "+555 123-4567"
+
+    def test_phone_number_empty(self):
+        with pytest.raises(ValidationError):
+            UpdateIVRArchitectureRequest(name="Sales IVR", phone_number="")
+
+    def test_description_optional(self):
+        req = UpdateIVRArchitectureRequest(name="Sales IVR", phone_number="5551234567")
+        assert req.description is None
+
+    def test_description_too_long(self):
+        with pytest.raises(ValidationError):
+            UpdateIVRArchitectureRequest(
+                name="Sales IVR",
+                phone_number="5551234567",
+                description="x" * 501,
+            )
+
+    def test_description_max_length(self):
+        req = UpdateIVRArchitectureRequest(
+            name="Sales IVR",
+            phone_number="5551234567",
+            description="x" * 500,
+        )
+        assert len(req.description) == 500

@@ -32,3 +32,15 @@ class IIVRArchitectureRepository(ABC):
     async def delete(self, architecture_id: UUID) -> None:
         """Elimina una IVR Architecture."""
         pass
+
+    @abstractmethod
+    async def update(
+        self,
+        architecture_id: UUID,
+        user_id: UUID,
+        name: str,
+        phone_number: str,
+        description: str | None = None,
+    ) -> IVRArchitectureEntity | None:
+        """Actualiza una IVR Architecture. Retorna None si no existe o no pertenece al usuario."""
+        pass

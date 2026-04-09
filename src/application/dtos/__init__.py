@@ -1,4 +1,4 @@
-from src.application.dtos.ivr_architecture import IVRArchitectureResponse
+from src.application.dtos.ivr_architecture import IVRArchitectureResponse, UpdateIVRArchitectureResponse
 from src.application.dtos.test_case import TestCaseResponse
 from src.application.dtos.test_execution import TestExecutionResponse
 from src.application.dtos.test_execution_details import (
@@ -18,6 +18,7 @@ from src.application.dtos.analytics import (
 
 __all__ = [
     "IVRArchitectureResponse",
+    "UpdateIVRArchitectureResponse",
     "TestCaseResponse",
     "TestExecutionResponse",
     "ExecutionLogResponse",

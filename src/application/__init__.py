@@ -11,7 +11,7 @@ from src.application.use_cases.create_ivr_architecture_use_case import (
 from src.application.use_cases.list_ivr_architectures_use_case import (
     ListIVRArchitecturesUseCase,
 )
-from src.application.dtos import IVRArchitectureResponse
+from src.application.dtos import IVRArchitectureResponse, UpdateIVRArchitectureResponse
 
 __all__ = [
     "ApplicationException",
@@ -22,4 +22,5 @@ __all__ = [
     "CreateIVRArchitectureUseCase",
     "ListIVRArchitecturesUseCase",
     "IVRArchitectureResponse",
+    "UpdateIVRArchitectureResponse",
 ]

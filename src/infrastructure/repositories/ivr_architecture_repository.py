@@ -1,4 +1,5 @@
 from uuid import UUID
+from datetime import datetime, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
@@ -55,6 +56,33 @@ class IVRArchitectureRepository(IIVRArchitectureRepository):
             raise NotFoundError(f"IVR Architecture {architecture_id} not found")
         await self.session.delete(model)
 
+    async def update(
+        self,
+        architecture_id: UUID,
+        user_id: UUID,
+        name: str,
+        phone_number: str,
+        description: str | None = None,
+    ) -> IVRArchitectureEntity | None:
+        """Actualiza una IVR Architecture. Retorna None si no existe o no pertenece al usuario."""
+        result = await self.session.execute(
+            select(IVRArchitectureModel).where(
+                (IVRArchitectureModel.id == architecture_id) &
+                (IVRArchitectureModel.user_id == user_id)
+            )
+        )
+        model = result.scalars().first()
+        if not model:
+            return None
+        
+        model.name = name
+        model.phone_number = phone_number
+        model.description = description
+        model.updated_at = datetime.now(timezone.utc)  # Actualizar manualmente el timestamp
+        
+        await self.session.flush()
+        return self._to_entity(model)
+
     @staticmethod
     def _to_entity(model: IVRArchitectureModel) -> IVRArchitectureEntity:
         return IVRArchitectureEntity(
@@ -64,4 +92,6 @@ class IVRArchitectureRepository(IIVRArchitectureRepository):
             description=model.description,
             user_id=model.user_id,
             created_at=model.created_at,
+            updated_at=model.updated_at,
+            provider=model.provider,
         )
