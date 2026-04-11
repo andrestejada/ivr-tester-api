@@ -1,0 +1,94 @@
+name: Test and Coverage
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-coverage:
+    name: Backend Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      APP_ENV: test
+      APP_PORT: '8000'
+      BASE_URL: http://localhost:8000
+      SUPABASE_URL: https://example.supabase.co
+      SUPABASE_KEY: test-key
+      SUPABASE_DB_URL: postgresql://postgres:postgres@localhost:5432/postgres
+      SUPABASE_JWT_SECRET: test-jwt-secret
+      TWILIO_ACCOUNT_SID: ACtestsid
+      TWILIO_AUTH_TOKEN: test-token
+      TWILIO_PHONE_NUMBER: '+10000000000'
+      DEEPGRAM_API_KEY: test-deepgram-key
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Run tests with coverage
+        run: |
+          set -o pipefail
+          uv run pytest tests/ -v --cov=src --cov-report=term-missing --cov-report=xml:coverage.xml --cov-report=html:htmlcov | tee pytest-output.txt
+
+      - name: Collect metrics
+        id: metrics
+        if: always()
+        run: |
+          COVERAGE=$(python - <<'PY'
+          import xml.etree.ElementTree as ET
+
+          try:
+              root = ET.parse('coverage.xml').getroot()
+              line_rate = float(root.attrib.get('line-rate', 0.0)) * 100
+              print(f'{line_rate:.2f}%')
+          except Exception:
+              print('N/A')
+          PY
+          )
+
+          echo "coverage=${COVERAGE}" >> "$GITHUB_OUTPUT"
+          echo "result=${{ job.status }}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            coverage.xml
+            htmlcov
+            pytest-output.txt
+          retention-days: 14
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "## Test and Coverage Summary"
+            echo ""
+            echo "| Metric | Value |"
+            echo "| --- | --- |"
+            echo "| Status | ${{ steps.metrics.outputs.result }} |"
+            echo "| Coverage (lines) | ${{ steps.metrics.outputs.coverage }} |"
+            echo "| Artifact | coverage-report |"
+          } >> "$GITHUB_STEP_SUMMARY"
