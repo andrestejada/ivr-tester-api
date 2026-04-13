@@ -15,4 +15,11 @@ wheels/
 # Ruff cache
 .ruff_cache/
 
+# Test and coverage artifacts
+.coverage
+.coverage.*
+.pytest_cache/
+htmlcov/
+.tox/
+
 copilot-instructions.md

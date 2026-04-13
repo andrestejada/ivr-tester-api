@@ -46,6 +46,19 @@ class GetExecutionAnalyticsUseCase:
             date_to = now
         if date_from is None:
             date_from = now - timedelta(days=7)
+        
+        # Validación defensiva: date_from no puede ser después de date_to
+        if date_from > date_to:
+            raise ValueError("date_from must be before or equal to date_to")
+        
+        # Validación defensiva: rango máximo de 90 días
+        max_range = timedelta(days=90)
+        if date_to - date_from > max_range:
+            raise ValueError("Date range cannot exceed 90 days")
+        
+        # Validación defensiva: top_n debe estar en rango válido
+        if not (1 <= top_n <= 50):
+            raise ValueError("top_n must be between 1 and 50")
 
         # Usar include_blocks si viene de repositorio, o default
         if include_blocks is None:

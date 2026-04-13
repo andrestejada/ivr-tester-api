@@ -232,3 +232,118 @@ class TestGetExecutionAnalyticsUseCase:
                 top_n=51,
             )
 
+    @pytest.mark.asyncio
+    async def test_execute_date_from_after_date_to(self):
+        """Verifica que rechaza date_from > date_to."""
+        from datetime import datetime, timedelta, timezone
+        from src.application.use_cases.get_execution_analytics_use_case import (
+            GetExecutionAnalyticsUseCase,
+        )
+
+        class FakeAnalyticsRepo:
+            async def get_execution_analytics(self, **kwargs):
+                pass
+
+        use_case = GetExecutionAnalyticsUseCase(FakeAnalyticsRepo())
+
+        now = datetime.now(timezone.utc)
+        past = now - timedelta(days=5)
+
+        # date_from > date_to debe fallar
+        with pytest.raises(ValueError, match="date_from must be before or equal to date_to"):
+            await use_case.execute(
+                architecture_id=UUID("550e8400-e29b-41d4-a716-446655440000"),
+                date_from=now,
+                date_to=past,
+            )
+
+    @pytest.mark.asyncio
+    async def test_execute_with_boundary_top_n_values(self):
+        """Verifica que acepta valores límite 1 y 50 para top_n."""
+        from src.application.use_cases.get_execution_analytics_use_case import (
+            GetExecutionAnalyticsUseCase,
+        )
+        from src.application.dtos import AnalyticsResponse, SelectedContext, Summary, Rankings
+
+        class FakeAnalyticsRepo:
+            async def get_execution_analytics(self, **kwargs):
+                return AnalyticsResponse(
+                    selected_context=SelectedContext(
+                        architecture_id=kwargs["architecture_id"],
+                        architecture_name="Test",
+                        test_case_id=None,
+                        test_case_name=None,
+                        date_from=kwargs["date_from"],
+                        date_to=kwargs["date_to"],
+                    ),
+                    summary=Summary(
+                        total_executions=1, passed_count=1, failed_count=0,
+                        error_count=0, running_count=0, success_rate=100.0,
+                        failure_rate=0.0, avg_duration_seconds=1.0,
+                    ),
+                    rankings=Rankings(),
+                    trend=[],
+                )
+
+        use_case = GetExecutionAnalyticsUseCase(FakeAnalyticsRepo())
+
+        # top_n=1 debe funcionar
+        result = await use_case.execute(
+            architecture_id=UUID("550e8400-e29b-41d4-a716-446655440000"),
+            top_n=1,
+        )
+        assert result is not None
+
+        # top_n=50 debe funcionar
+        result = await use_case.execute(
+            architecture_id=UUID("550e8400-e29b-41d4-a716-446655440000"),
+            top_n=50,
+        )
+        assert result is not None
+
+        # top_n=0 debe fallar
+        with pytest.raises(ValueError, match="top_n must be between 1 and 50"):
+            await use_case.execute(
+                architecture_id=UUID("550e8400-e29b-41d4-a716-446655440000"),
+                top_n=0,
+            )
+
+    @pytest.mark.asyncio
+    async def test_execute_with_include_blocks_none_defaults(self):
+        """Verifica que cuando include_blocks es None, usa defaults."""
+        from src.application.use_cases.get_execution_analytics_use_case import (
+            GetExecutionAnalyticsUseCase,
+        )
+        from src.application.dtos import AnalyticsResponse, SelectedContext, Summary, Rankings
+
+        class FakeAnalyticsRepo:
+            async def get_execution_analytics(self, **kwargs):
+                # Verificar que se pasó el default de include_blocks
+                assert kwargs["include_blocks"] == ["summary", "rankings", "trend"]
+                return AnalyticsResponse(
+                    selected_context=SelectedContext(
+                        architecture_id=kwargs["architecture_id"],
+                        architecture_name="Test",
+                        test_case_id=None,
+                        test_case_name=None,
+                        date_from=kwargs["date_from"],
+                        date_to=kwargs["date_to"],
+                    ),
+                    summary=Summary(
+                        total_executions=1, passed_count=1, failed_count=0,
+                        error_count=0, running_count=0, success_rate=100.0,
+                        failure_rate=0.0, avg_duration_seconds=1.0,
+                    ),
+                    rankings=Rankings(),
+                    trend=[],
+                )
+
+        use_case = GetExecutionAnalyticsUseCase(FakeAnalyticsRepo())
+
+        # No pasar include_blocks y verificar que se usan defaults
+        result = await use_case.execute(
+            architecture_id=UUID("550e8400-e29b-41d4-a716-446655440000"),
+            include_blocks=None,
+        )
+        assert result is not None
+

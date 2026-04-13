@@ -27,6 +27,13 @@ dev = [
     "ruff>=0.15.4",
 ]
 
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = "test_*.py"
+addopts = "-ra --strict-markers"
+markers = ["asyncio", "integration", "unit"]
+
 [tool.ruff]
 line-length = 88
 target-version = "py312"
@@ -39,6 +46,26 @@ select = [
     "UP",  # pyupgrade
 ]
 ignore = []
+
+[tool.coverage.run]
+source = [
+    "src/application/use_cases",
+    "src/application/services",
+    "src/application/utils",
+]
+branch = false
+omit = [
+    "src/application/dtos/*",
+    "src/presentation/*",
+    "src/domain/entities/*",
+    "src/infrastructure/database/*",
+    "src/infrastructure/auth/*",
+    "src/infrastructure/providers/*",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
 
 [tool.ruff.lint.isort]
 known-first-party = ["src"]

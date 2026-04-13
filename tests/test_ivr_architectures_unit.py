@@ -4,6 +4,8 @@ from src.presentation.api.v1.schemas.ivr_architecture import (
     UpdateIVRArchitectureRequest,
 )
 from pydantic import ValidationError
+from datetime import datetime
+from uuid import UUID
 
 
 class TestCreateIVRArchitectureRequestSchema:
@@ -116,3 +118,107 @@ class TestUpdateIVRArchitectureRequestSchema:
             description="x" * 500,
         )
         assert len(req.description) == 500
+
+
+class TestListIVRArchitecturesUseCase:
+    """Tests para el caso de uso de listar arquitecturas IVR por usuario."""
+
+    @pytest.mark.asyncio
+    async def test_execute_returns_empty_list_when_no_architectures(self):
+        """Verifica que retorna lista vacía cuando no hay arquitecturas."""
+        from src.application.use_cases.list_ivr_architectures_use_case import (
+            ListIVRArchitecturesUseCase,
+        )
+
+        class FakeRepo:
+            async def list_by_user(self, user_id):
+                return []
+
+        use_case = ListIVRArchitecturesUseCase(FakeRepo())
+
+        result = await use_case.execute(UUID("550e8400-e29b-41d4-a716-446655440000"))
+
+        assert result == []
+        assert isinstance(result, list)
+
+    @pytest.mark.asyncio
+    async def test_execute_maps_entities_to_dtos(self):
+        """Verifica que mapea entidades a DTOs correctamente."""
+        from src.application.use_cases.list_ivr_architectures_use_case import (
+            ListIVRArchitecturesUseCase,
+        )
+        from src.domain.entities.ivr_architecture import IVRArchitectureEntity
+
+        user_id = UUID("550e8400-e29b-41d4-a716-446655440000")
+        arch_id = UUID("550e8400-e29b-41d4-a716-446655440001")
+
+        class FakeRepo:
+            async def list_by_user(self, uid):
+                return [
+                    IVRArchitectureEntity(
+                        id=arch_id,
+                        name="Sales IVR",
+                        phone_number="5551234567",
+                        description="Main sales flow",
+                        provider="twilio",
+                        user_id=uid,
+                        created_at=datetime(2025, 1, 1, 10, 0, 0),
+                    )
+                ]
+
+        use_case = ListIVRArchitecturesUseCase(FakeRepo())
+
+        result = await use_case.execute(user_id)
+
+        assert len(result) == 1
+        assert result[0].id == arch_id
+        assert result[0].name == "Sales IVR"
+        assert result[0].phone_number == "5551234567"
+        assert result[0].description == "Main sales flow"
+        assert result[0].provider == "twilio"
+        assert result[0].created_at == datetime(2025, 1, 1, 10, 0, 0)
+
+    @pytest.mark.asyncio
+    async def test_execute_maps_multiple_architectures(self):
+        """Verifica que mapea múltiples entidades correctamente."""
+        from src.application.use_cases.list_ivr_architectures_use_case import (
+            ListIVRArchitecturesUseCase,
+        )
+        from src.domain.entities.ivr_architecture import IVRArchitectureEntity
+
+        user_id = UUID("550e8400-e29b-41d4-a716-446655440000")
+        arch_id_1 = UUID("550e8400-e29b-41d4-a716-446655440001")
+        arch_id_2 = UUID("550e8400-e29b-41d4-a716-446655440002")
+
+        class FakeRepo:
+            async def list_by_user(self, uid):
+                return [
+                    IVRArchitectureEntity(
+                        id=arch_id_1,
+                        name="Sales IVR",
+                        phone_number="5551234567",
+                        description="Sales flow",
+                        provider="twilio",
+                        user_id=uid,
+                        created_at=datetime(2025, 1, 1, 10, 0, 0),
+                    ),
+                    IVRArchitectureEntity(
+                        id=arch_id_2,
+                        name="Support IVR",
+                        phone_number="5559876543",
+                        description="Support flow",
+                        provider="deepgram",
+                        user_id=uid,
+                        created_at=datetime(2025, 1, 2, 11, 0, 0),
+                    ),
+                ]
+
+        use_case = ListIVRArchitecturesUseCase(FakeRepo())
+
+        result = await use_case.execute(user_id)
+
+        assert len(result) == 2
+        assert result[0].id == arch_id_1
+        assert result[0].name == "Sales IVR"
+        assert result[1].id == arch_id_2
+        assert result[1].name == "Support IVR"

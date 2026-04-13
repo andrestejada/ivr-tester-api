@@ -48,7 +48,9 @@ jobs:
       - name: Run tests with coverage
         run: |
           set -o pipefail
-          uv run pytest tests/ -v --cov=src --cov-report=term-missing --cov-report=xml:coverage.xml --cov-report=html:htmlcov | tee pytest-output.txt
+          uv run pytest tests/ -v --cov=src/application/use_cases --cov=src/application/services --cov=src/application/utils --cov-report=term-missing --cov-report=xml:coverage.xml --cov-report=html:htmlcov | tee pytest-output.txt
+          EXIT_CODE=$?
+          echo "Test exit code: $EXIT_CODE"
 
       - name: Collect metrics
         id: metrics
@@ -89,6 +91,6 @@ jobs:
             echo "| Metric | Value |"
             echo "| --- | --- |"
             echo "| Status | ${{ steps.metrics.outputs.result }} |"
-            echo "| Coverage (lines) | ${{ steps.metrics.outputs.coverage }} |"
+            echo "| Coverage (business logic lines) | ${{ steps.metrics.outputs.coverage }} |"
             echo "| Artifact | coverage-report |"
           } >> "$GITHUB_STEP_SUMMARY"

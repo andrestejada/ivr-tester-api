@@ -65,7 +65,7 @@ class TestExecutionDetailsResponse(BaseModel):
     status: str
     duration_seconds: int | None
     provider_call_sid: str | None
-    full_call_transcript: str | None
+    full_call_transcript: str | None = None
     executed_at: datetime
     # Nested relations
     test_case: TestCaseDetailResponse
