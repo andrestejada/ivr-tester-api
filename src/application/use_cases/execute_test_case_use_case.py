@@ -25,6 +25,7 @@ from src.application.dtos.realtime_events import ExecutionEvent
 from src.application.services.ivr_state_machine import (
     IVRStateMachine,
     SILENCE_THRESHOLD_SECONDS,
+    STEP_TIMEOUT_SECONDS,
     EXTREME_SILENCE_THRESHOLD_SECONDS,
     GRACE_PERIOD_AFTER_DTMF_SECONDS,
     SIMILARITY_THRESHOLD,
@@ -43,6 +44,11 @@ logger = get_logger(__name__)
 AUDIO_TIMEOUT_SECONDS = 30.0
 STREAM_POLL_SECONDS = 0.5
 REPETITION_THRESHOLD = 0.50  # 50% - similitud para detectar si el IVR está repitiendo el menú
+STEP_STAGNATION_SECONDS = 12.0
+STEP_STAGNATION_MAX_RATIO = 0.45
+STEP_STAGNATION_MIN_SILENCE_SECONDS = 4.0
+PASSIVE_TIMEOUT_FALLBACK_RATIO = 0.72
+PASSIVE_TIMEOUT_FALLBACK_MIN_TOKENS = 18
 
 # Stopwords comunes para robustecer similitud ante variaciones ASR en frases largas.
 SIMILARITY_STOPWORDS = {
@@ -592,8 +598,89 @@ class ExecuteTestCaseUseCase:
                         all_passed = False
                         break
 
+                # 3c2. Timeout por step para evitar loops infinitos cuando no existe match posible
+                if state_machine.check_step_timeout():
+                    elapsed = state_machine.get_elapsed_time_current_step()
+                    best_ratio = state_machine.get_best_similarity_ratio()
+
+                    # Fallback para pasos pasivos largos: permite continuar si hubo
+                    # suficiente similitud al agotar timeout, evitando falsos negativos
+                    # intermitentes por ASR en mensajes de bienvenida extensos.
+                    expected_tokens = self._tokenize_for_similarity(expected_text)
+                    is_passive_timeout_candidate = (
+                        not current_step.get("action")
+                        and len(expected_tokens) >= PASSIVE_TIMEOUT_FALLBACK_MIN_TOKENS
+                        and best_ratio >= PASSIVE_TIMEOUT_FALLBACK_RATIO
+                    )
+                    if is_passive_timeout_candidate:
+                        fallback_confidence = Decimal(str(best_ratio * 100)).quantize(Decimal("0.01"))
+                        logger.warning(
+                            f"Step {step_number}: Passive timeout fallback accepted | "
+                            f"ratio={best_ratio:.2%} | elapsed={elapsed:.1f}s"
+                        )
+
+                        try:
+                            step_matched_event = ExecutionEvent.step_matched(
+                                execution_id,
+                                step_number,
+                                current_full_text or "",
+                                float(fallback_confidence),
+                            )
+                            await self.event_hub.publish(step_matched_event)
+                        except Exception as e:
+                            logger.debug(f"Error emitiendo evento de step_matched en timeout fallback: {e}")
+
+                        await self._log_step(
+                            execution_id,
+                            step_number,
+                            expected_text,
+                            current_full_text or None,
+                            fallback_confidence,
+                            (
+                                "No action (passive step - timeout fallback accepted: "
+                                f"{best_ratio:.2%})"
+                            ),
+                            execution_log_repo=execution_log_repo,
+                        )
+                        state_machine.advance_to_next_step(current_full_text or "")
+                        continue
+
+                    await _fail_current_step(
+                        step_number=step_number,
+                        expected_text=expected_text,
+                        actual_text=current_full_text or None,
+                        reason=(
+                            f"Step timeout exceeded: {elapsed:.1f}s >= {STEP_TIMEOUT_SECONDS}s "
+                            f"(best_ratio={best_ratio:.2%})"
+                        ),
+                        confidence=Decimal(str(best_ratio * 100)).quantize(Decimal("0.01")),
+                    )
+                    all_passed = False
+                    break
+
+                # 3c3. Detectar estancamiento: baja similitud sin mejoras por una ventana sostenida
+                if state_machine.check_step_stagnation(
+                    stagnation_seconds=STEP_STAGNATION_SECONDS,
+                    max_ratio_without_progress=STEP_STAGNATION_MAX_RATIO,
+                    min_silence_seconds=STEP_STAGNATION_MIN_SILENCE_SECONDS,
+                ):
+                    best_ratio = state_machine.get_best_similarity_ratio()
+                    wait_without_progress = state_machine.get_seconds_since_similarity_improvement()
+                    await _fail_current_step(
+                        step_number=step_number,
+                        expected_text=expected_text,
+                        actual_text=current_full_text or None,
+                        reason=(
+                            f"Step stagnated: no similarity improvement for {wait_without_progress:.1f}s "
+                            f"with best_ratio={best_ratio:.2%}"
+                        ),
+                        confidence=Decimal(str(best_ratio * 100)).quantize(Decimal("0.01")),
+                    )
+                    all_passed = False
+                    break
+
                 
-                # 3c2. EXTREME SILENCE CHECK - Cortar llamada si >15s sin audio/transcripción
+                # 3c4. EXTREME SILENCE CHECK - Cortar llamada si >15s sin audio/transcripción
                 # Pero respetar grace period de 4s post-DTMF para transiciones normales
                 silence_duration = state_machine.get_silence_duration()
                 in_grace_period = False
@@ -638,7 +725,7 @@ class ExecuteTestCaseUseCase:
                     all_passed = False
                     break
                 
-                # 3c3. Chequear silencio (informativo - no interrumpe la espera)
+                # 3c5. Chequear silencio (informativo - no interrumpe la espera)
                 silence_duration = state_machine.get_silence_duration()
                 if silence_duration >= SILENCE_THRESHOLD_SECONDS and silence_duration < SILENCE_THRESHOLD_SECONDS + 0.1:
                     # Log una sola vez cuando cruza el umbral (evitar spam)

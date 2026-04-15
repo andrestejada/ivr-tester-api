@@ -23,7 +23,7 @@ from src.infrastructure.logger import get_logger
 logger = get_logger(__name__)
 
 # Timeouts y thresholds
-STEP_TIMEOUT_SECONDS = 20.0  # Máximo tiempo esperando el texto de un step
+STEP_TIMEOUT_SECONDS = 30.0  # Máximo tiempo esperando el texto de un step
 SILENCE_THRESHOLD_SECONDS = 5.0  # Silencio de 5s indica fin del step (no hay más opciones)
 EARLY_EXIT_SILENCE_SECONDS = 1.0
 STREAM_POLL_SECONDS = 0.5
@@ -60,6 +60,9 @@ class IVRStateMachineState:
     previous_step_transcript: str = ""  # Transcripción anterior del step actual (para detectar repeticiones)
     last_evaluated_text: str = ""  # Cache para evitar re-evaluar el mismo texto (reduce DEBUG logs)
     last_match_result: 'StepMatchResult | None' = None  # Cache del ultimo resultado de match
+    last_similarity_ratio: float = 0.0
+    best_similarity_ratio: float = 0.0
+    last_similarity_improvement_time: float = field(default_factory=time)
 
 
 class IVRStateMachine:
@@ -230,6 +233,8 @@ class IVRStateMachine:
             )
             # Cache the result
             self._cache_evaluation_result(expected_text, current_full_text, EARLY_EXIT_THRESHOLD, (ratio, confidence, is_match))
+
+        self._update_similarity_progress(ratio)
         
         if is_match:
             logger.info(
@@ -248,6 +253,55 @@ class IVRStateMachine:
             )
         
         return None
+
+    def _update_similarity_progress(self, ratio: float, min_delta: float = 0.01) -> None:
+        """Track best similarity progress for the current step."""
+        self.state.last_similarity_ratio = ratio
+        if ratio > self.state.best_similarity_ratio + min_delta:
+            self.state.best_similarity_ratio = ratio
+            self.state.last_similarity_improvement_time = time()
+
+    def get_last_similarity_ratio(self) -> float:
+        """Return latest similarity ratio observed for current step."""
+        return self.state.last_similarity_ratio
+
+    def get_best_similarity_ratio(self) -> float:
+        """Return best similarity ratio observed for current step."""
+        return self.state.best_similarity_ratio
+
+    def get_seconds_since_similarity_improvement(self) -> float:
+        """Return seconds elapsed since the last meaningful similarity improvement."""
+        return time() - self.state.last_similarity_improvement_time
+
+    def check_step_stagnation(
+        self,
+        stagnation_seconds: float,
+        max_ratio_without_progress: float = 0.60,
+        min_silence_seconds: float = 3.0,
+    ) -> bool:
+        """Detect if current step is stalled with low similarity and no progress."""
+        if self.state.best_similarity_ratio <= 0.0:
+            return False
+
+        if self.state.best_similarity_ratio >= max_ratio_without_progress:
+            return False
+
+        seconds_without_progress = self.get_seconds_since_similarity_improvement()
+        if seconds_without_progress < stagnation_seconds:
+            return False
+
+        silence_duration = self.get_silence_duration()
+        if silence_duration < min_silence_seconds:
+            return False
+
+        current_step = self.get_current_step()
+        step_number = current_step.get("step") if current_step else self.state.current_step_index + 1
+        logger.warning(
+            f"Step {step_number}: ✗ STAGNATION DETECTED (no similarity progress for {seconds_without_progress:.1f}s). "
+            f"best_ratio={self.state.best_similarity_ratio:.2%}, threshold_for_progress={max_ratio_without_progress:.0%}, "
+            f"silence={silence_duration:.1f}s"
+        )
+        return True
     
     def check_step_timeout(self) -> bool:
         """¿Se excedió el timeout esperando este step?"""
@@ -338,6 +392,9 @@ class IVRStateMachine:
         self.state.last_text_time = time()
         self.state.transcript_final_event.clear()
         self.state.early_match_found = False
+        self.state.last_similarity_ratio = 0.0
+        self.state.best_similarity_ratio = 0.0
+        self.state.last_similarity_improvement_time = time()
         
         current_step = self.get_current_step()
         if current_step:
@@ -352,6 +409,9 @@ class IVRStateMachine:
         """
         self.state.transcript_parts = []
         self.state.current_partial = ""
+        self.state.last_similarity_ratio = 0.0
+        self.state.best_similarity_ratio = 0.0
+        self.state.last_similarity_improvement_time = time()
     
     def _build_global_transcript(self) -> str:
         """Construye el transcript global acumulado."""

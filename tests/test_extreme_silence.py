@@ -11,6 +11,7 @@ from src.application.use_cases import execute_test_case_use_case as execute_modu
 from src.application.services import ivr_state_machine as state_machine_module
 from src.application.services.ivr_state_machine import (
     IVRStateMachine,
+    STEP_TIMEOUT_SECONDS,
     EXTREME_SILENCE_THRESHOLD_SECONDS,
     GRACE_PERIOD_AFTER_DTMF_SECONDS,
 )
@@ -44,6 +45,49 @@ class TestExtremeSilenceStateMachine:
     def test_grace_period_constant_defined(self):
         """GRACE_PERIOD_AFTER_DTMF_SECONDS constant should be 4.0."""
         assert GRACE_PERIOD_AFTER_DTMF_SECONDS == 4.0
+
+    def test_step_timeout_detected(self):
+        """State machine should flag timeout when waiting longer than threshold."""
+        from time import time as get_time
+
+        def mock_evaluate(expected, transcribed, threshold=0.8):
+            return (0.4, Decimal("40"), False)
+
+        flow_script = [{"step": 1, "listen": "Test", "action": "1"}]
+        machine = IVRStateMachine(flow_script, mock_evaluate)
+        machine.state.step_start_time = get_time() - (STEP_TIMEOUT_SECONDS + 1.0)
+
+        assert machine.check_step_timeout() is True
+
+    def test_step_stagnation_detected_for_low_ratio(self):
+        """State machine should detect low-ratio stagnation after no progress window."""
+        from time import time as get_time
+
+        def mock_evaluate(expected, transcribed, threshold=0.8):
+            return (0.3, Decimal("30"), False)
+
+        flow_script = [{"step": 1, "listen": "Test", "action": "1"}]
+        machine = IVRStateMachine(flow_script, mock_evaluate)
+        machine.state.transcript_parts = ["texto previo"]
+        machine.state.last_text_time = get_time() - 4.0
+        machine.state.best_similarity_ratio = 0.35
+        machine.state.last_similarity_improvement_time = get_time() - 9.0
+
+        assert machine.check_step_stagnation(stagnation_seconds=8.0, max_ratio_without_progress=0.6) is True
+
+    def test_step_stagnation_not_detected_when_ratio_is_close(self):
+        """Stagnation should not fail if best ratio is already close to target threshold."""
+        from time import time as get_time
+
+        def mock_evaluate(expected, transcribed, threshold=0.8):
+            return (0.7, Decimal("70"), False)
+
+        flow_script = [{"step": 1, "listen": "Test", "action": "1"}]
+        machine = IVRStateMachine(flow_script, mock_evaluate)
+        machine.state.best_similarity_ratio = 0.70
+        machine.state.last_similarity_improvement_time = get_time() - 9.0
+
+        assert machine.check_step_stagnation(stagnation_seconds=8.0, max_ratio_without_progress=0.6) is False
 
 
 class TestExtremeSlience:

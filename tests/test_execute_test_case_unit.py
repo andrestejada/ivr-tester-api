@@ -334,10 +334,123 @@ class TestExecuteTestCaseUseCase:
         assert result.status == "RUNNING"
         assert result.id == execution.id
         
-        # Give background task a window to potentially execute
-        # (Note: in this test we're checking that the use case at least
-        # returns RUNNING synchronously without crashing)
-        await asyncio.sleep(0.05)
+        # Wait for background flow to fail fast by step-timeout
+        await asyncio.sleep(0.3)
+
+        failed_status_updates = [
+            call
+            for call in mock_test_execution_repo.update_status.call_args_list
+            if call.kwargs.get("status") == "FAILED"
+        ]
+        assert failed_status_updates, "Expected execution to finish as FAILED"
+
+        logged_actions = [
+            call.args[0].action_taken
+            for call in mock_execution_log_repo.create.call_args_list
+            if call.args
+        ]
+        assert any("timeout" in action.lower() for action in logged_actions)
+
+    @pytest.mark.asyncio
+    async def test_execute_fails_on_stagnation_before_timeout(
+        self,
+        use_case,
+        mock_test_case_repo,
+        mock_test_execution_repo,
+        mock_execution_log_repo,
+        mock_call_provider,
+        mock_asr_provider,
+        mock_call_session_store,
+        monkeypatch,
+    ):
+        """Test stagnation fail-fast: low similarity without progress should fail the step."""
+        test_case_id = uuid4()
+        phone_number = "+1234567890"
+        webhook_url = "http://localhost:8000/webhooks/twilio/voice"
+
+        flow_script = [{"step": 1, "listen": "conocer estados financieros", "action": "5"}]
+        test_case = TestCaseEntity(
+            id=test_case_id,
+            ivr_architecture_id=uuid4(),
+            name="Test Stagnation",
+            flow_script=flow_script,
+            created_at=datetime.now(timezone.utc),
+        )
+        mock_test_case_repo.get_by_id.return_value = test_case
+
+        execution = TestExecutionEntity(
+            id=uuid4(),
+            test_case_id=test_case_id,
+            status="RUNNING",
+            duration_seconds=None,
+            provider_call_sid=None,
+            executed_at=datetime.now(timezone.utc),
+        )
+        mock_test_execution_repo.create.return_value = execution
+        persisted_execution = TestExecutionEntity(
+            id=execution.id,
+            test_case_id=test_case_id,
+            status="RUNNING",
+            duration_seconds=None,
+            provider_call_sid="CA123456789",
+            executed_at=execution.executed_at,
+        )
+        mock_test_execution_repo.update_provider_call_sid.return_value = persisted_execution
+
+        call_session = CallSessionEntity(
+            call_sid="CA123456789",
+            started_at=datetime.now(timezone.utc),
+            is_active=True,
+        )
+        mock_call_provider.initiate_call.return_value = call_session
+
+        # Keep timeout high so stagnation is the first terminal condition
+        monkeypatch.setattr(state_machine_module, "STEP_TIMEOUT_SECONDS", 1.0)
+        monkeypatch.setattr(execute_module, "STEP_STAGNATION_SECONDS", 0.05)
+        monkeypatch.setattr(execute_module, "STEP_STAGNATION_MAX_RATIO", 0.80)
+        monkeypatch.setattr(execute_module, "STEP_STAGNATION_MIN_SILENCE_SECONDS", 0.05)
+
+        mock_call_session_store.try_dequeue_audio.return_value = b"audio_data"
+
+        async def _set_handler(cb):
+            mock_asr_provider._cb = cb
+
+        sent_once = {"value": False}
+
+        async def _send_audio(_chunk):
+            if getattr(mock_asr_provider, "_cb", None) and not sent_once["value"]:
+                sent_once["value"] = True
+                await mock_asr_provider._cb("conocer saldo", True)
+
+        mock_asr_provider.set_transcript_handler.side_effect = _set_handler
+        mock_asr_provider.send_audio.side_effect = _send_audio
+
+        failed_execution = TestExecutionEntity(
+            id=execution.id,
+            test_case_id=test_case_id,
+            status="FAILED",
+            duration_seconds=1.0,
+            provider_call_sid="CA123456789",
+            executed_at=datetime.now(timezone.utc),
+        )
+        mock_test_execution_repo.update_status.return_value = failed_execution
+
+        await use_case.execute(test_case_id, phone_number, webhook_url)
+        await asyncio.sleep(0.6)
+
+        failed_status_updates = [
+            call
+            for call in mock_test_execution_repo.update_status.call_args_list
+            if call.kwargs.get("status") == "FAILED"
+        ]
+        assert failed_status_updates, "Expected execution to finish as FAILED"
+
+        logged_actions = [
+            call.args[0].action_taken
+            for call in mock_execution_log_repo.create.call_args_list
+            if call.args
+        ]
+        assert any("stagnated" in action.lower() for action in logged_actions)
 
     @pytest.mark.asyncio
     async def test_execute_audio_timeout(
@@ -443,3 +556,117 @@ class TestExecuteTestCaseUseCase:
         
         # Give potential background task a window
         await asyncio.sleep(0.05)
+
+    @pytest.mark.asyncio
+    async def test_execute_passive_long_step_timeout_fallback_accepts_match(
+        self,
+        use_case,
+        mock_test_case_repo,
+        mock_test_execution_repo,
+        mock_execution_log_repo,
+        mock_call_provider,
+        mock_asr_provider,
+        mock_call_session_store,
+        monkeypatch,
+    ):
+        """Passive long step should pass on timeout when best similarity is good enough."""
+        test_case_id = uuid4()
+        phone_number = "+1234567890"
+        webhook_url = "http://localhost:8000/webhooks/twilio/voice"
+
+        expected_long_text = (
+            "bienvenido a la linea de servicio al cliente emcali le informamos que por razones de calidad "
+            "su llamada podra ser grabada o monitoreada senor usuario le informamos que sus datos seran "
+            "tratados conforme a las disposiciones establecidas en la ley mil quinientos ochenta y uno "
+            "de dos mil doce proteccion de datos personales"
+        )
+
+        flow_script = [{"step": 1, "listen": expected_long_text, "action": None}]
+        test_case = TestCaseEntity(
+            id=test_case_id,
+            ivr_architecture_id=uuid4(),
+            name="Passive Timeout Fallback",
+            flow_script=flow_script,
+            created_at=datetime.now(timezone.utc),
+        )
+        mock_test_case_repo.get_by_id.return_value = test_case
+
+        execution = TestExecutionEntity(
+            id=uuid4(),
+            test_case_id=test_case_id,
+            status="RUNNING",
+            duration_seconds=None,
+            provider_call_sid=None,
+            executed_at=datetime.now(timezone.utc),
+        )
+        mock_test_execution_repo.create.return_value = execution
+        persisted_execution = TestExecutionEntity(
+            id=execution.id,
+            test_case_id=test_case_id,
+            status="RUNNING",
+            duration_seconds=None,
+            provider_call_sid="CA123456789",
+            executed_at=execution.executed_at,
+        )
+        mock_test_execution_repo.update_provider_call_sid.return_value = persisted_execution
+
+        call_session = CallSessionEntity(
+            call_sid="CA123456789",
+            started_at=datetime.now(timezone.utc),
+            is_active=True,
+        )
+        mock_call_provider.initiate_call.return_value = call_session
+
+        monkeypatch.setattr(state_machine_module, "STEP_TIMEOUT_SECONDS", 0.1)
+        monkeypatch.setattr(execute_module, "PASSIVE_TIMEOUT_FALLBACK_RATIO", 0.72)
+        monkeypatch.setattr(execute_module, "PASSIVE_TIMEOUT_FALLBACK_MIN_TOKENS", 8)
+
+        mock_call_session_store.try_dequeue_audio.return_value = b"audio_data"
+
+        async def _set_handler(cb):
+            mock_asr_provider._cb = cb
+
+        sent_once = {"value": False}
+
+        async def _send_audio(_chunk):
+            if getattr(mock_asr_provider, "_cb", None) and not sent_once["value"]:
+                sent_once["value"] = True
+                await mock_asr_provider._cb(
+                    "a la linea de servicio al cliente emcali le informamos por razones de calidad su llamada",
+                    True,
+                )
+
+        mock_asr_provider.set_transcript_handler.side_effect = _set_handler
+        mock_asr_provider.send_audio.side_effect = _send_audio
+
+        # Force similarity below strict 85% but above passive timeout fallback threshold.
+        use_case._evaluate_transcription = MagicMock(return_value=(0.7409, Decimal("74.09"), False))
+
+        passed_execution = TestExecutionEntity(
+            id=execution.id,
+            test_case_id=test_case_id,
+            status="PASSED",
+            duration_seconds=1.0,
+            provider_call_sid="CA123456789",
+            executed_at=datetime.now(timezone.utc),
+        )
+        mock_test_execution_repo.update_status.return_value = passed_execution
+
+        result = await use_case.execute(test_case_id, phone_number, webhook_url)
+        assert result.status == "RUNNING"
+
+        await asyncio.sleep(0.4)
+
+        passed_status_updates = [
+            call
+            for call in mock_test_execution_repo.update_status.call_args_list
+            if call.kwargs.get("status") == "PASSED"
+        ]
+        assert passed_status_updates, "Expected execution to finish as PASSED using timeout fallback"
+
+        logged_actions = [
+            call.args[0].action_taken
+            for call in mock_execution_log_repo.create.call_args_list
+            if call.args
+        ]
+        assert any("timeout fallback accepted" in action.lower() for action in logged_actions)

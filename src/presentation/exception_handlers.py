@@ -1,5 +1,8 @@
+import socket
+
 from fastapi import Request
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import DBAPIError, OperationalError
 
 from src.application.exceptions import (
     ApplicationException,
@@ -52,10 +55,27 @@ async def global_exception_handler(
     )
 
 
+async def transient_connectivity_exception_handler(
+    request: Request, exc: Exception
+) -> JSONResponse:
+    logger.warning(
+        f"Transient connectivity error: {type(exc).__name__}: {exc} | path={request.url.path}"
+    )
+    return JSONResponse(
+        status_code=503,
+        content={
+            "detail": "Servicio temporalmente no disponible por conectividad de base de datos. Intenta de nuevo."
+        },
+    )
+
+
 def register_exception_handlers(app) -> None:
     app.add_exception_handler(NotFoundError, not_found_handler)
     app.add_exception_handler(ConflictError, conflict_handler)
     app.add_exception_handler(ForbiddenError, forbidden_handler)
     app.add_exception_handler(BusinessValidationError, business_validation_handler)
     app.add_exception_handler(ApplicationException, application_exception_handler)
+    app.add_exception_handler(socket.gaierror, transient_connectivity_exception_handler)
+    app.add_exception_handler(OperationalError, transient_connectivity_exception_handler)
+    app.add_exception_handler(DBAPIError, transient_connectivity_exception_handler)
     app.add_exception_handler(Exception, global_exception_handler)
