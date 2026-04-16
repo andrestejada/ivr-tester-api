@@ -188,3 +188,140 @@ class TestCacheIntegration:
         
         # Should only call evaluate_fn once (first time), others from cache
         assert evaluate_fn_mock.call_count <= 2  # Allow for minor variations
+
+
+class TestStateMachineUncoveredBranches:
+    """Cubre ramas de estado/transcript aún no ejercitadas."""
+
+    def test_accumulate_transcript_text_updates_partial_and_time(self):
+        def evaluate_fn(expected, transcribed, threshold=0.8):
+            return (0.2, Decimal("20"), False)
+
+        machine = IVRStateMachine(
+            [{"step": 1, "listen": "hola", "action": None}],
+            evaluate_fn,
+        )
+        previous_time = machine.state.last_text_time
+
+        machine.accumulate_transcript_text("hola parcial", is_final=False)
+
+        assert machine.state.current_partial == "hola parcial"
+        assert machine.state.last_text_time >= previous_time
+
+    def test_accumulate_transcript_text_final_sets_endpoint_event(self):
+        def evaluate_fn(expected, transcribed, threshold=0.8):
+            return (0.2, Decimal("20"), False)
+
+        machine = IVRStateMachine(
+            [{"step": 1, "listen": "hola", "action": None}],
+            evaluate_fn,
+        )
+
+        machine.accumulate_transcript_text("hola final", is_final=True, speech_final=True)
+
+        assert machine.state.transcript_parts == ["hola final"]
+        assert machine.state.current_partial == ""
+        assert machine.state.transcript_final_event.is_set() is True
+
+    def test_check_for_step_match_returns_none_when_listen_is_empty(self):
+        evaluate_fn = Mock(return_value=(0.95, Decimal("95"), True))
+        machine = IVRStateMachine(
+            [{"step": 1, "listen": "", "action": None}],
+            evaluate_fn,
+        )
+        machine.accumulate_transcript_text("cualquier texto", is_final=True)
+
+        result = machine.check_for_step_match()
+
+        assert result is None
+        evaluate_fn.assert_not_called()
+
+    def test_check_for_step_match_returns_none_when_buffer_empty(self):
+        evaluate_fn = Mock(return_value=(0.95, Decimal("95"), True))
+        machine = IVRStateMachine(
+            [{"step": 1, "listen": "hola", "action": None}],
+            evaluate_fn,
+        )
+
+        result = machine.check_for_step_match()
+
+        assert result is None
+        evaluate_fn.assert_not_called()
+
+    def test_check_for_step_match_returns_none_when_no_match(self):
+        evaluate_fn = Mock(return_value=(0.30, Decimal("30"), False))
+        machine = IVRStateMachine(
+            [{"step": 1, "listen": "texto esperado", "action": None}],
+            evaluate_fn,
+        )
+        machine.accumulate_transcript_text("texto diferente", is_final=True)
+
+        result = machine.check_for_step_match()
+
+        assert result is None
+        assert machine.get_last_similarity_ratio() == 0.30
+
+    def test_check_if_step_repeated_detects_repetition(self):
+        evaluate_fn = Mock(return_value=(0.9, Decimal("90"), True))
+        machine = IVRStateMachine(
+            [{"step": 1, "listen": "menu", "action": None}],
+            evaluate_fn,
+        )
+        machine.state.previous_step_transcript = "bienvenido menu principal"
+
+        is_repeated = machine.check_if_step_repeated(
+            "bienvenido menu principal", repeat_threshold=0.5
+        )
+
+        assert is_repeated is True
+
+    def test_check_if_step_repeated_returns_false_for_different_text(self):
+        evaluate_fn = Mock(return_value=(0.9, Decimal("90"), True))
+        machine = IVRStateMachine(
+            [{"step": 1, "listen": "menu", "action": None}],
+            evaluate_fn,
+        )
+        machine.state.previous_step_transcript = "menu de ventas"
+
+        is_repeated = machine.check_if_step_repeated(
+            "informacion de facturacion", repeat_threshold=0.8
+        )
+
+        assert is_repeated is False
+
+    def test_advance_to_next_step_resets_step_state(self):
+        evaluate_fn = Mock(return_value=(0.9, Decimal("90"), True))
+        machine = IVRStateMachine(
+            [
+                {"step": 1, "listen": "hola", "action": "1"},
+                {"step": 2, "listen": "adios", "action": None},
+            ],
+            evaluate_fn,
+        )
+        machine.state.transcript_parts = ["hola"]
+        machine.state.current_partial = "menu"
+
+        machine.advance_to_next_step("hola")
+
+        assert machine.state.current_step_index == 1
+        assert machine.state.full_call_transcript.strip() == "hola"
+        assert machine.state.previous_step_transcript == "hola menu"
+        assert machine.state.transcript_parts == []
+        assert machine.state.current_partial == ""
+        assert machine.state.transcript_final_event.is_set() is False
+
+    def test_build_and_finalize_full_transcript(self):
+        evaluate_fn = Mock(return_value=(0.9, Decimal("90"), True))
+        machine = IVRStateMachine(
+            [{"step": 1, "listen": "hola", "action": None}],
+            evaluate_fn,
+        )
+        machine.state.full_call_transcript = "inicio"
+        machine.state.transcript_parts = ["mitad"]
+        machine.state.current_partial = "final"
+
+        global_transcript = machine._build_global_transcript()
+        final_transcript = machine.finalize_and_get_full_transcript(additional_text="extra")
+
+        assert global_transcript == "iniciomitad"
+        assert final_transcript == "inicio mitad final extra"

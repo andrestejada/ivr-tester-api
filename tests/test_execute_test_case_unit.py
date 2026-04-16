@@ -4,6 +4,7 @@ import asyncio
 import pytest
 from datetime import datetime, timezone
 from decimal import Decimal
+from time import time
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
@@ -740,3 +741,598 @@ class TestExecuteTestCaseSimilarityHelpers:
         assert ratio_low == pytest.approx(ratio)
         assert is_match_high is False
         assert is_match_low is True
+
+
+class TestExecuteTestCaseCriticalFlowHelpers:
+    """Cubre helpers críticos de flujo y finalización sin depender de background tasks."""
+
+    @pytest.mark.asyncio
+    async def test_execute_action_returns_passive_step_when_no_action(self, use_case, mock_call_provider):
+        action_taken, has_error = await use_case._execute_action(
+            call_sid="CA123",
+            action=None,
+            step_number=1,
+        )
+
+        assert action_taken == "No action (passive step)"
+        assert has_error is False
+        mock_call_provider.send_dtmf.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_execute_action_sends_dtmf_and_returns_success(
+        self, use_case, mock_call_provider, monkeypatch
+    ):
+        async def _no_wait(_seconds):
+            return None
+
+        monkeypatch.setattr(execute_module.asyncio, "sleep", _no_wait)
+
+        action_taken, has_error = await use_case._execute_action(
+            call_sid="CA123",
+            action="12",
+            step_number=2,
+        )
+
+        assert action_taken == "Sent DTMF: 12"
+        assert has_error is False
+        mock_call_provider.send_dtmf.assert_awaited_once_with(
+            call_sid="CA123",
+            digits="12",
+        )
+
+    @pytest.mark.asyncio
+    async def test_execute_action_returns_error_when_provider_fails(
+        self, use_case, mock_call_provider
+    ):
+        mock_call_provider.send_dtmf.side_effect = RuntimeError("socket error")
+
+        action_taken, has_error = await use_case._execute_action(
+            call_sid="CA123",
+            action="9",
+            step_number=3,
+        )
+
+        assert has_error is True
+        assert action_taken.startswith("DTMF error:")
+        assert "socket error" in action_taken
+
+    @pytest.mark.asyncio
+    async def test_log_step_persists_execution_log_entity(self, use_case, mock_execution_log_repo):
+        execution_id = uuid4()
+
+        await use_case._log_step(
+            execution_id=execution_id,
+            step_number=1,
+            expected_text="Bienvenido",
+            actual_transcription="Bienvenido",
+            confidence=Decimal("97.50"),
+            action_taken="Sent DTMF: 1",
+        )
+
+        mock_execution_log_repo.create.assert_awaited_once()
+        created_log = mock_execution_log_repo.create.call_args.args[0]
+        assert isinstance(created_log, ExecutionLogEntity)
+        assert created_log.execution_id == execution_id
+        assert created_log.step_number == 1
+        assert created_log.confidence_score == Decimal("97.50")
+
+    @pytest.mark.asyncio
+    async def test_log_step_swallows_repository_errors(self, use_case, mock_execution_log_repo):
+        mock_execution_log_repo.create.side_effect = RuntimeError("db unavailable")
+
+        await use_case._log_step(
+            execution_id=uuid4(),
+            step_number=1,
+            expected_text="Texto",
+            actual_transcription=None,
+            confidence=Decimal("0.00"),
+            action_taken="Timeout waiting for audio",
+        )
+
+        mock_execution_log_repo.create.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_record_step_failure_logs_and_publishes_event(
+        self, use_case, mock_execution_log_repo, mock_event_hub
+    ):
+        use_case._log_step = AsyncMock()
+        execution_id = uuid4()
+
+        await use_case._record_step_failure(
+            execution_id=execution_id,
+            step_number=2,
+            expected_text="marque uno",
+            actual_text="marque dos",
+            reason="Failed text match",
+            confidence=Decimal("64.00"),
+            execution_log_repo=mock_execution_log_repo,
+        )
+
+        use_case._log_step.assert_awaited_once()
+        mock_event_hub.publish.assert_awaited_once()
+        published_event = mock_event_hub.publish.call_args.args[0]
+        assert published_event.event_type.value == "step_failed"
+        assert published_event.execution_id == execution_id
+
+    @pytest.mark.asyncio
+    async def test_record_step_failure_ignores_event_publish_errors(
+        self, use_case, mock_execution_log_repo, mock_event_hub
+    ):
+        use_case._log_step = AsyncMock()
+        mock_event_hub.publish.side_effect = RuntimeError("hub down")
+
+        await use_case._record_step_failure(
+            execution_id=uuid4(),
+            step_number=4,
+            expected_text="opcion cuatro",
+            actual_text=None,
+            reason="Timeout",
+            confidence=Decimal("0.00"),
+            execution_log_repo=mock_execution_log_repo,
+        )
+
+        use_case._log_step.assert_awaited_once()
+        mock_event_hub.publish.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_process_single_step_returns_false_on_transcription_error(self, use_case):
+        use_case._get_transcription = AsyncMock(return_value=(None, "Timeout waiting for audio"))
+        use_case._log_step = AsyncMock()
+        use_case._evaluate_transcription = MagicMock()
+
+        result = await use_case._process_single_step(
+            execution_id=uuid4(),
+            call_sid="CA123",
+            step={"step": 1, "listen": "bienvenido", "action": None},
+            step_index=1,
+        )
+
+        assert result is False
+        use_case._log_step.assert_awaited_once()
+        use_case._evaluate_transcription.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_process_single_step_returns_false_on_mismatch(self, use_case):
+        use_case._get_transcription = AsyncMock(return_value=("texto distinto", None))
+        use_case._evaluate_transcription = MagicMock(return_value=(0.40, Decimal("40.00"), False))
+        use_case._log_step = AsyncMock()
+        use_case._execute_action = AsyncMock()
+
+        result = await use_case._process_single_step(
+            execution_id=uuid4(),
+            call_sid="CA123",
+            step={"step": 2, "listen": "texto esperado", "action": "1"},
+            step_index=2,
+        )
+
+        assert result is False
+        use_case._log_step.assert_awaited_once()
+        use_case._execute_action.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_process_single_step_returns_false_on_action_error(self, use_case):
+        use_case._get_transcription = AsyncMock(return_value=("opcion uno", None))
+        use_case._evaluate_transcription = MagicMock(return_value=(0.93, Decimal("93.00"), True))
+        use_case._execute_action = AsyncMock(return_value=("DTMF error: socket", True))
+        use_case._log_step = AsyncMock()
+
+        result = await use_case._process_single_step(
+            execution_id=uuid4(),
+            call_sid="CA123",
+            step={"step": 3, "listen": "opcion uno", "action": "1"},
+            step_index=3,
+        )
+
+        assert result is False
+        use_case._execute_action.assert_awaited_once()
+        use_case._log_step.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_process_single_step_returns_true_on_success(self, use_case):
+        use_case._get_transcription = AsyncMock(return_value=("opcion uno", None))
+        use_case._evaluate_transcription = MagicMock(return_value=(0.95, Decimal("95.00"), True))
+        use_case._execute_action = AsyncMock(return_value=("Sent DTMF: 1", False))
+        use_case._log_step = AsyncMock()
+
+        result = await use_case._process_single_step(
+            execution_id=uuid4(),
+            call_sid="CA123",
+            step={"step": 4, "listen": "opcion uno", "action": "1"},
+            step_index=4,
+        )
+
+        assert result is True
+        use_case._execute_action.assert_awaited_once()
+        use_case._log_step.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_finalize_execution_success_path(
+        self,
+        use_case,
+        mock_test_execution_repo,
+        mock_call_provider,
+        mock_call_session_store,
+        mock_event_hub,
+        monkeypatch,
+    ):
+        async def _no_wait(_seconds):
+            return None
+
+        monkeypatch.setattr(execute_module.asyncio, "sleep", _no_wait)
+
+        execution_id = uuid4()
+        call_sid = "CA123"
+        await use_case._finalize_execution(
+            execution_id=execution_id,
+            call_sid=call_sid,
+            start_time=time() - 2,
+            all_passed=True,
+        )
+
+        mock_test_execution_repo.update_status.assert_awaited_once()
+        status_kwargs = mock_test_execution_repo.update_status.call_args.kwargs
+        assert status_kwargs["status"] == "PASSED"
+        assert status_kwargs["duration_seconds"] >= 0
+
+        mock_event_hub.publish.assert_awaited_once()
+        published_event = mock_event_hub.publish.call_args.args[0]
+        assert published_event.event_type.value == "execution_finished"
+        assert published_event.data["status"] == "PASSED"
+
+        mock_call_provider.hangup.assert_awaited_once_with(call_sid)
+        mock_call_session_store.close_session.assert_awaited_once_with(call_sid)
+
+    @pytest.mark.asyncio
+    async def test_finalize_execution_emits_error_event_when_status_update_fails(
+        self,
+        use_case,
+        mock_test_execution_repo,
+        mock_call_provider,
+        mock_call_session_store,
+        mock_event_hub,
+        monkeypatch,
+    ):
+        async def _no_wait(_seconds):
+            return None
+
+        monkeypatch.setattr(execute_module.asyncio, "sleep", _no_wait)
+        mock_test_execution_repo.update_status.side_effect = RuntimeError("connection refused")
+
+        execution_id = uuid4()
+        call_sid = "CA999"
+        await use_case._finalize_execution(
+            execution_id=execution_id,
+            call_sid=call_sid,
+            start_time=time() - 1,
+            all_passed=False,
+        )
+
+        mock_test_execution_repo.update_status.assert_awaited_once()
+        mock_event_hub.publish.assert_awaited_once()
+        published_event = mock_event_hub.publish.call_args.args[0]
+        assert published_event.event_type.value == "execution_error"
+        assert published_event.execution_id == execution_id
+        assert published_event.data["status"] == "ERROR"
+
+        # El cleanup debe ocurrir incluso cuando falla update_status
+        mock_call_provider.hangup.assert_awaited_once_with(call_sid)
+        mock_call_session_store.close_session.assert_awaited_once_with(call_sid)
+
+
+class TestExecuteTestCaseStreamingAndMonitoring:
+    """Cubre paths críticos de streaming ASR y monitoreo de inactividad."""
+
+    @pytest.mark.asyncio
+    async def test_get_transcription_returns_connect_error_when_asr_connect_fails(
+        self, use_case, mock_asr_provider
+    ):
+        mock_asr_provider._is_connected = False
+        mock_asr_provider.connect.side_effect = RuntimeError("deepgram unavailable")
+
+        transcription, error = await use_case._get_transcription(
+            call_sid="CA123",
+            step_number=1,
+            expected_text="hola",
+        )
+
+        assert transcription is None
+        assert error is not None
+        assert error.startswith("ASR connect error")
+
+    @pytest.mark.asyncio
+    async def test_get_transcription_returns_timeout_when_no_audio_received(
+        self, use_case, mock_asr_provider, mock_call_session_store, monkeypatch
+    ):
+        mock_asr_provider._is_connected = True
+        mock_call_session_store.try_dequeue_audio.return_value = None
+
+        monkeypatch.setattr(execute_module, "AUDIO_TIMEOUT_SECONDS", 0.01)
+
+        transcription, error = await use_case._get_transcription(
+            call_sid="CA456",
+            step_number=2,
+            expected_text="menu principal",
+            should_clear_queue=True,
+        )
+
+        assert transcription is None
+        assert error == "Timeout waiting for audio"
+        mock_call_session_store.clear_queue.assert_awaited_once_with("CA456")
+        mock_asr_provider.set_transcript_handler.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_get_transcription_returns_text_when_speech_final_arrives(
+        self, use_case, mock_asr_provider, mock_call_session_store, monkeypatch
+    ):
+        mock_asr_provider._is_connected = True
+
+        async def _no_wait(_seconds):
+            return None
+
+        monkeypatch.setattr(execute_module.asyncio, "sleep", _no_wait)
+
+        stored_handler = {"cb": None}
+
+        async def _set_handler(cb):
+            stored_handler["cb"] = cb
+
+        async def _send_audio(_chunk):
+            await stored_handler["cb"]("hola mundo", True, True)
+
+        mock_asr_provider.set_transcript_handler.side_effect = _set_handler
+        mock_asr_provider.send_audio.side_effect = _send_audio
+        mock_call_session_store.try_dequeue_audio.return_value = b"audio_chunk"
+
+        transcription, error = await use_case._get_transcription(
+            call_sid="CA789",
+            step_number=3,
+            expected_text="hola mundo",
+        )
+
+        assert error is None
+        assert transcription == "hola mundo"
+        mock_asr_provider.send_audio.assert_awaited_once_with(b"audio_chunk")
+
+    @pytest.mark.asyncio
+    async def test_get_transcription_preserves_queue_when_flag_is_false(
+        self, use_case, mock_asr_provider, mock_call_session_store, monkeypatch
+    ):
+        mock_asr_provider._is_connected = True
+        mock_call_session_store.try_dequeue_audio.return_value = None
+        monkeypatch.setattr(execute_module, "AUDIO_TIMEOUT_SECONDS", 0.01)
+
+        await use_case._get_transcription(
+            call_sid="CA998",
+            step_number=4,
+            expected_text="texto",
+            should_clear_queue=False,
+        )
+
+        mock_call_session_store.clear_queue.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_monitor_audio_inactivity_stops_when_session_disappears(
+        self, use_case, mock_asr_provider, mock_call_session_store, monkeypatch
+    ):
+        async def _no_wait(_seconds):
+            return None
+
+        monkeypatch.setattr(execute_module.asyncio, "sleep", _no_wait)
+        mock_call_session_store.get_seconds_since_last_audio.return_value = None
+
+        await use_case._monitor_audio_inactivity("CA111")
+
+        mock_call_session_store.get_seconds_since_last_audio.assert_awaited_once_with("CA111")
+        mock_asr_provider.disconnect.assert_not_called()
+        mock_asr_provider.connect.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_monitor_audio_inactivity_reconnects_asr_after_threshold(
+        self, use_case, mock_asr_provider, mock_call_session_store, monkeypatch
+    ):
+        async def _no_wait(_seconds):
+            return None
+
+        monkeypatch.setattr(execute_module.asyncio, "sleep", _no_wait)
+        mock_asr_provider._is_connected = True
+        mock_call_session_store.get_seconds_since_last_audio.side_effect = [6.5, None]
+
+        session = CallSessionEntity(
+            call_sid="CA222",
+            started_at=datetime.now(timezone.utc),
+            is_active=True,
+        )
+        mock_call_session_store.get_session.return_value = session
+
+        await use_case._monitor_audio_inactivity("CA222")
+
+        mock_asr_provider.disconnect.assert_awaited_once()
+        mock_asr_provider.connect.assert_awaited_once()
+        mock_call_session_store.get_session.assert_awaited_once_with("CA222")
+        assert session.last_audio_timestamp is not None
+
+    @pytest.mark.asyncio
+    async def test_finalize_execution_continues_when_hangup_and_cleanup_fail(
+        self,
+        use_case,
+        mock_test_execution_repo,
+        mock_call_provider,
+        mock_call_session_store,
+        mock_event_hub,
+        monkeypatch,
+    ):
+        async def _no_wait(_seconds):
+            return None
+
+        monkeypatch.setattr(execute_module.asyncio, "sleep", _no_wait)
+        mock_call_provider.hangup.side_effect = RuntimeError("hangup failed")
+        mock_call_session_store.close_session.side_effect = RuntimeError("close failed")
+
+        await use_case._finalize_execution(
+            execution_id=uuid4(),
+            call_sid="CA333",
+            start_time=time() - 1,
+            all_passed=True,
+        )
+
+        mock_test_execution_repo.update_status.assert_awaited_once()
+        mock_event_hub.publish.assert_awaited_once()
+        mock_call_provider.hangup.assert_awaited_once_with("CA333")
+        mock_call_session_store.close_session.assert_awaited_once_with("CA333")
+
+
+class TestExecuteTestCaseBackgroundRecovery:
+    """Cubre recovery paths en orquestación de background."""
+
+    @pytest.fixture
+    def sample_execution(self):
+        return TestExecutionEntity(
+            id=uuid4(),
+            test_case_id=uuid4(),
+            status="RUNNING",
+            duration_seconds=None,
+            provider_call_sid=None,
+            executed_at=datetime.now(timezone.utc),
+        )
+
+    @pytest.fixture
+    def sample_test_case(self):
+        return TestCaseEntity(
+            id=uuid4(),
+            ivr_architecture_id=uuid4(),
+            name="Background flow",
+            flow_script=[{"step": 1, "listen": "bienvenido", "action": None}],
+            created_at=datetime.now(timezone.utc),
+        )
+
+    @pytest.mark.asyncio
+    async def test_process_call_background_recovers_pending_rollback(
+        self, use_case, sample_execution, sample_test_case
+    ):
+        recovery_repo = AsyncMock()
+
+        class FakeUow:
+            def __init__(self, repo):
+                self.test_execution_repo = repo
+                self.execution_log_repo = AsyncMock()
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        use_case.uow_factory = lambda: FakeUow(recovery_repo)
+        use_case._process_call_background_with_repos = AsyncMock(
+            side_effect=execute_module.PendingRollbackError("rollback-only")
+        )
+
+        await use_case._process_call_background(
+            execution=sample_execution,
+            test_case=sample_test_case,
+            phone_number="+12025550001",
+            webhook_url="http://localhost/webhook",
+        )
+
+        recovery_repo.update_status.assert_awaited_once()
+        kwargs = recovery_repo.update_status.call_args.kwargs
+        assert kwargs["status"] == "FAILED"
+        assert kwargs["duration_seconds"] >= 0
+
+    @pytest.mark.asyncio
+    async def test_process_call_background_recovers_unhandled_exception(
+        self, use_case, sample_execution, sample_test_case
+    ):
+        recovery_repo = AsyncMock()
+
+        class FakeUow:
+            def __init__(self, repo):
+                self.test_execution_repo = repo
+                self.execution_log_repo = AsyncMock()
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        use_case.uow_factory = lambda: FakeUow(recovery_repo)
+        use_case._process_call_background_with_repos = AsyncMock(
+            side_effect=RuntimeError("unexpected background error")
+        )
+
+        await use_case._process_call_background(
+            execution=sample_execution,
+            test_case=sample_test_case,
+            phone_number="+12025550002",
+            webhook_url="http://localhost/webhook",
+        )
+
+        recovery_repo.update_status.assert_awaited_once()
+        kwargs = recovery_repo.update_status.call_args.kwargs
+        assert kwargs["status"] == "ERROR"
+        assert kwargs["duration_seconds"] >= 0
+
+    @pytest.mark.asyncio
+    async def test_process_call_background_with_repos_handles_initiate_call_failure(
+        self, use_case, sample_execution, sample_test_case, monkeypatch
+    ):
+        async def _no_wait(_seconds):
+            return None
+
+        monkeypatch.setattr(execute_module.asyncio, "sleep", _no_wait)
+        use_case.call_provider.initiate_call.side_effect = RuntimeError("connection refused")
+
+        test_execution_repo = AsyncMock()
+        execution_log_repo = AsyncMock()
+
+        await use_case._process_call_background_with_repos(
+            execution=sample_execution,
+            test_case=sample_test_case,
+            phone_number="+12025550003",
+            webhook_url="http://localhost/webhook",
+            test_execution_repo=test_execution_repo,
+            execution_log_repo=execution_log_repo,
+            start_time=time() - 2,
+        )
+
+        test_execution_repo.update_status.assert_awaited_once()
+        status_kwargs = test_execution_repo.update_status.call_args.kwargs
+        assert status_kwargs["status"] == "ERROR"
+        assert status_kwargs["duration_seconds"] >= 0
+
+        use_case.event_hub.publish.assert_awaited_once()
+        event = use_case.event_hub.publish.call_args.args[0]
+        assert event.event_type.value == "execution_error"
+
+    @pytest.mark.asyncio
+    async def test_process_call_background_with_repos_hangs_up_when_sid_persist_fails(
+        self, use_case, sample_execution, sample_test_case, monkeypatch
+    ):
+        async def _no_wait(_seconds):
+            return None
+
+        monkeypatch.setattr(execute_module.asyncio, "sleep", _no_wait)
+
+        call_session = CallSessionEntity(
+            call_sid="CA-PERSIST-FAIL",
+            started_at=datetime.now(timezone.utc),
+            is_active=True,
+        )
+        use_case.call_provider.initiate_call.return_value = call_session
+
+        test_execution_repo = AsyncMock()
+        test_execution_repo.update_provider_call_sid.side_effect = RuntimeError("db write failed")
+
+        await use_case._process_call_background_with_repos(
+            execution=sample_execution,
+            test_case=sample_test_case,
+            phone_number="+12025550004",
+            webhook_url="http://localhost/webhook",
+            test_execution_repo=test_execution_repo,
+            execution_log_repo=AsyncMock(),
+            start_time=time() - 1,
+        )
+
+        use_case.call_provider.hangup.assert_awaited_once_with("CA-PERSIST-FAIL")
+        test_execution_repo.update_status.assert_awaited_once()
