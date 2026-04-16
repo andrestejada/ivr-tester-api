@@ -670,3 +670,73 @@ class TestExecuteTestCaseUseCase:
             if call.args
         ]
         assert any("timeout fallback accepted" in action.lower() for action in logged_actions)
+
+
+class TestExecuteTestCaseSimilarityHelpers:
+    """Tests granulares para helpers puros de similitud."""
+
+    def test_normalize_similarity_text_removes_accents_and_punctuation(self, use_case):
+        raw = "  ¡Óptimo,   menú número 1!  "
+
+        normalized = use_case._normalize_similarity_text(raw)
+
+        assert normalized == "optimo menu numero 1"
+
+    def test_tokenize_for_similarity_removes_stopwords(self, use_case):
+        text = "para ventas marque uno por favor"
+
+        tokens = use_case._tokenize_for_similarity(text)
+
+        # "para", "uno" y "por" son stopwords; las palabras de señal permanecen.
+        assert tokens == ["ventas", "marque", "favor"]
+
+    def test_ordered_token_coverage_returns_partial_ratio(self, use_case):
+        expected_tokens = ["hola", "mundo", "ivr"]
+        candidate_tokens = ["foo", "hola", "x", "mundo"]
+
+        coverage = use_case._ordered_token_coverage(expected_tokens, candidate_tokens)
+
+        assert coverage == pytest.approx(2 / 3)
+
+    def test_ordered_token_coverage_returns_zero_on_empty_inputs(self, use_case):
+        assert use_case._ordered_token_coverage([], ["hola"]) == 0.0
+        assert use_case._ordered_token_coverage(["hola"], []) == 0.0
+
+    def test_evaluate_transcription_fast_path_exact_substring(self, use_case):
+        ratio, confidence, is_match = use_case._evaluate_transcription(
+            expected_text="para ventas marque 2",
+            transcription="bienvenido para ventas marque 2 gracias",
+        )
+
+        assert ratio == 1.0
+        assert confidence == Decimal("100.00")
+        assert is_match is True
+
+    def test_evaluate_transcription_respects_threshold_parameter(self, use_case):
+        expected = "hola mundo adios"
+        transcription = "hola mundo"
+
+        ratio, _, _ = use_case._evaluate_transcription(
+            expected_text=expected,
+            transcription=transcription,
+            threshold=0.0,
+        )
+
+        high_threshold = min(1.0, ratio + 0.01)
+        low_threshold = max(0.0, ratio - 0.01)
+
+        ratio_high, _, is_match_high = use_case._evaluate_transcription(
+            expected_text=expected,
+            transcription=transcription,
+            threshold=high_threshold,
+        )
+        ratio_low, _, is_match_low = use_case._evaluate_transcription(
+            expected_text=expected,
+            transcription=transcription,
+            threshold=low_threshold,
+        )
+
+        assert ratio_high == pytest.approx(ratio)
+        assert ratio_low == pytest.approx(ratio)
+        assert is_match_high is False
+        assert is_match_low is True
