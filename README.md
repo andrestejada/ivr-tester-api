@@ -60,6 +60,8 @@ uv run alembic downgrade -1
 
 ## Arrancar el servidor
 
+### Desarrollo local
+
 ```bash
 uv run uvicorn main:app --reload --port 8000
 ```
@@ -67,6 +69,73 @@ uv run uvicorn main:app --reload --port 8000
 - API disponible en: `http://localhost:8000`
 - Documentación interactiva (Swagger): `http://localhost:8000/docs`
 - Health check: `GET http://localhost:8000/api/v1/health`
+
+## Docker
+
+### Build de la imagen
+
+La imagen está optimizada usando **multistage build** para minimizar tamaño final (excluye tests, dependencias de desarrollo y herramientas de compilación).
+
+```bash
+# Buildear imagen desde ivr-tester-api/
+docker build -t ivr-tester-api:latest .
+
+# Ver layers y tamaño de la imagen
+docker image ls ivr-tester-api:latest
+docker history ivr-tester-api:latest
+```
+
+### Ejecutar el contenedor
+
+```bash
+# Copiar variables de entorno
+cp .env.example .env
+# ... editar .env con valores reales ...
+
+# Ejecutar contenedor con variables de entorno
+docker run --rm \
+  --env-file .env \
+  -p 8000:8000 \
+  ivr-tester-api:latest
+```
+
+Valida que la API está respondiendo:
+```bash
+curl http://localhost:8000/api/v1/health
+```
+
+### Migraciones de base de datos en Docker
+
+⚠️ **Importante:** Las migraciones se ejecutan **fuera del contenedor API**, como paso previo.
+
+```bash
+# Ejecutar migraciones antes de levantar la API
+docker run --rm \
+  --env-file .env \
+  ivr-tester-api:latest \
+  alembic upgrade head
+
+# Ver estado actual de migraciones
+docker run --rm \
+  --env-file .env \
+  ivr-tester-api:latest \
+  alembic current
+```
+
+### Con Docker Compose (opcional)
+
+Para un flujo local más simple con gestión integrada de variables de entorno:
+
+```bash
+# 1. Copiar el ejemplo y completar variables
+cp .env.example .env
+
+# 2. Ejecutar con compose (archivo no incluido, crear si necesitas)
+# docker-compose up
+
+# 3. Acceder a la API
+# curl http://localhost:8000/api/v1/health
+```
 
 ## Tests Automatizados
 
