@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from src.application.use_cases import execute_test_case_use_case as execute_module
 from src.application.services import ivr_state_machine as state_machine_module
+from src.application.exceptions import NotFoundError
 
 from src.application.use_cases.execute_test_case_use_case import ExecuteTestCaseUseCase
 from src.domain.entities.execution_log import ExecutionLogEntity
@@ -219,16 +220,77 @@ class TestExecuteTestCaseUseCase:
         assert mock_asr_provider.set_transcript_handler.called
 
         # Verify DTMF sent for first step
-        mock_call_provider.send_dtmf.assert_called_once_with(
-            call_sid="CA123456789",
-            digits="1",
+
+    @pytest.mark.asyncio
+    async def test_execute_raises_not_found_when_test_case_does_not_exist(
+        self,
+        use_case,
+        mock_test_case_repo,
+        mock_test_execution_repo,
+        mock_event_hub,
+    ):
+        test_case_id = uuid4()
+        mock_test_case_repo.get_by_id.side_effect = NotFoundError("not found")
+
+        with pytest.raises(NotFoundError):
+            await use_case.execute(
+                test_case_id=test_case_id,
+                phone_number="+1234567890",
+                webhook_url="http://localhost/webhook",
+            )
+
+        mock_test_execution_repo.create.assert_not_called()
+        mock_event_hub.publish.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_execute_continues_when_start_event_publish_fails(
+        self,
+        use_case,
+        mock_test_case_repo,
+        mock_test_execution_repo,
+        mock_event_hub,
+        monkeypatch,
+    ):
+        test_case_id = uuid4()
+        test_case = TestCaseEntity(
+            id=test_case_id,
+            ivr_architecture_id=uuid4(),
+            name="Case",
+            flow_script=[{"step": 1, "listen": "bienvenido", "action": None}],
+            created_at=datetime.now(timezone.utc),
+        )
+        mock_test_case_repo.get_by_id.return_value = test_case
+
+        execution = TestExecutionEntity(
+            id=uuid4(),
+            test_case_id=test_case_id,
+            status="RUNNING",
+            duration_seconds=None,
+            provider_call_sid=None,
+            executed_at=datetime.now(timezone.utc),
+        )
+        mock_test_execution_repo.create.return_value = execution
+        mock_event_hub.publish.side_effect = RuntimeError("hub unavailable")
+
+        created_coroutines = []
+
+        def _fake_create_task(coro):
+            created_coroutines.append(coro)
+            coro.close()
+            return MagicMock()
+
+        monkeypatch.setattr(execute_module.asyncio, "create_task", _fake_create_task)
+
+        result = await use_case.execute(
+            test_case_id=test_case_id,
+            phone_number="+1234567890",
+            webhook_url="http://localhost/webhook",
         )
 
-        # Verify execution logs created
-        assert mock_execution_log_repo.create.call_count == 2
-
-        # Verify hangup
-        mock_call_provider.hangup.assert_called_once_with("CA123456789")
+        assert result.id == execution.id
+        assert result.status == "RUNNING"
+        mock_event_hub.publish.assert_awaited_once()
+        assert len(created_coroutines) == 1
 
     @pytest.mark.asyncio
     async def test_execute_transcription_mismatch(

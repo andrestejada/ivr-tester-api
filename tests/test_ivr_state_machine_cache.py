@@ -325,3 +325,56 @@ class TestStateMachineUncoveredBranches:
 
         assert global_transcript == "iniciomitad"
         assert final_transcript == "inicio mitad final extra"
+
+    def test_check_for_step_match_returns_none_when_current_step_is_none(self):
+        evaluate_fn = Mock(return_value=(0.95, Decimal("95"), True))
+        machine = IVRStateMachine(
+            [{"step": 1, "listen": "hola", "action": None}],
+            evaluate_fn,
+        )
+        machine.state.current_step_index = 99
+
+        result = machine.check_for_step_match()
+
+        assert result is None
+        evaluate_fn.assert_not_called()
+
+    def test_check_step_stagnation_uses_fallback_step_number_when_no_current_step(self):
+        from time import time as get_time
+
+        evaluate_fn = Mock(return_value=(0.40, Decimal("40"), False))
+        machine = IVRStateMachine(
+            [{"step": 1, "listen": "hola", "action": None}],
+            evaluate_fn,
+        )
+        # Forzar estado sin current_step para cubrir rama de fallback de step_number.
+        machine.state.current_step_index = 1
+        machine.state.transcript_parts = ["algo"]
+        machine.state.last_text_time = get_time() - 5.0
+        machine.state.best_similarity_ratio = 0.35
+        machine.state.last_similarity_improvement_time = get_time() - 10.0
+
+        is_stagnated = machine.check_step_stagnation(
+            stagnation_seconds=8.0,
+            max_ratio_without_progress=0.6,
+            min_silence_seconds=3.0,
+        )
+
+        assert is_stagnated is True
+
+    def test_clear_buffer_for_new_step_resets_transcription_state(self):
+        machine = IVRStateMachine(
+            [{"step": 1, "listen": "hola", "action": None}],
+            Mock(return_value=(0.9, Decimal("90"), True)),
+        )
+        machine.state.transcript_parts = ["residual"]
+        machine.state.current_partial = "fragmento"
+        machine.state.last_similarity_ratio = 0.55
+        machine.state.best_similarity_ratio = 0.71
+
+        machine.clear_buffer_for_new_step()
+
+        assert machine.state.transcript_parts == []
+        assert machine.state.current_partial == ""
+        assert machine.state.last_similarity_ratio == 0.0
+        assert machine.state.best_similarity_ratio == 0.0
