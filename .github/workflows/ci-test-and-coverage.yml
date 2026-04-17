@@ -56,19 +56,91 @@ jobs:
         id: metrics
         if: always()
         run: |
-          COVERAGE=$(python - <<'PY'
+          python - <<'PY'
+          import os
           import xml.etree.ElementTree as ET
-
+          
+          output_file = os.environ["GITHUB_OUTPUT"]
+          files_table_path = "coverage-files-table.md"
+          
+          def write_outputs(values: dict[str, str]) -> None:
+            with open(output_file, "a", encoding="utf-8") as f:
+              for k, v in values.items():
+                f.write(f"{k}={v}\n")
+          
           try:
-              root = ET.parse('coverage.xml').getroot()
-              line_rate = float(root.attrib.get('line-rate', 0.0)) * 100
-              print(f'{line_rate:.2f}%')
+            root = ET.parse("coverage.xml").getroot()
           except Exception:
-              print('N/A')
+            write_outputs({
+              "coverage": "N/A",
+              "covered_lines": "N/A",
+              "missed_lines": "N/A",
+              "measurable_lines": "N/A",
+              "files_count": "0",
+            })
+            with open(files_table_path, "w", encoding="utf-8") as f:
+              f.write("### Coverage by File\n\n")
+              f.write("Coverage details are unavailable because coverage.xml could not be parsed.\n")
+          else:
+            files: dict[str, dict[str, int]] = {}
+          
+            for class_node in root.findall(".//class"):
+              filename = class_node.attrib.get("filename", "").strip()
+              if not filename:
+                continue
+          
+              line_nodes = class_node.findall("./lines/line")
+              measurable = len(line_nodes)
+              covered = sum(1 for ln in line_nodes if int(ln.attrib.get("hits", "0")) > 0)
+          
+              entry = files.setdefault(
+                filename,
+                {"covered": 0, "measurable": 0},
+              )
+              entry["covered"] += covered
+              entry["measurable"] += measurable
+          
+            lines_covered = int(root.attrib.get("lines-covered", "0"))
+            lines_valid = int(root.attrib.get("lines-valid", "0"))
+          
+            # Fallback for environments where root attrs are not populated.
+            if lines_valid == 0:
+              lines_valid = sum(item["measurable"] for item in files.values())
+              lines_covered = sum(item["covered"] for item in files.values())
+          
+            line_rate = (lines_covered / lines_valid * 100.0) if lines_valid else 0.0
+            missed = max(lines_valid - lines_covered, 0)
+          
+            rows = []
+            for filename, item in files.items():
+              measurable = item["measurable"]
+              covered = item["covered"]
+              missed_lines = max(measurable - covered, 0)
+              pct = (covered / measurable * 100.0) if measurable else 0.0
+              rows.append((pct, filename, covered, missed_lines, measurable))
+          
+            rows.sort(key=lambda r: (r[0], r[1]))
+          
+            with open(files_table_path, "w", encoding="utf-8") as f:
+              f.write("### Coverage by File\n\n")
+              f.write("| File | Coverage | Covered | Missed | Measurable |\n")
+              f.write("| --- | ---: | ---: | ---: | ---: |\n")
+              for pct, filename, covered, missed_lines, measurable in rows:
+                f.write(
+                  f"| {filename} | {pct:.2f}% | {covered} | {missed_lines} | {measurable} |\n"
+                )
+          
+            write_outputs(
+              {
+                "coverage": f"{line_rate:.2f}%",
+                "covered_lines": str(lines_covered),
+                "missed_lines": str(missed),
+                "measurable_lines": str(lines_valid),
+                "files_count": str(len(rows)),
+              }
+            )
           PY
-          )
 
-          echo "coverage=${COVERAGE}" >> "$GITHUB_OUTPUT"
           echo "result=${{ job.status }}" >> "$GITHUB_OUTPUT"
 
       - name: Upload artifacts
@@ -80,6 +152,7 @@ jobs:
             coverage.xml
             htmlcov
             pytest-output.txt
+            coverage-files-table.md
           retention-days: 14
 
       - name: Job summary
@@ -92,5 +165,17 @@ jobs:
             echo "| --- | --- |"
             echo "| Status | ${{ steps.metrics.outputs.result }} |"
             echo "| Coverage (business logic lines) | ${{ steps.metrics.outputs.coverage }} |"
+            echo "| Covered lines | ${{ steps.metrics.outputs.covered_lines }} |"
+            echo "| Missed lines | ${{ steps.metrics.outputs.missed_lines }} |"
+            echo "| Measurable lines | ${{ steps.metrics.outputs.measurable_lines }} |"
+            echo "| Files measured | ${{ steps.metrics.outputs.files_count }} |"
             echo "| Artifact | coverage-report |"
+            echo ""
+            echo "Use the artifact **coverage-report** to inspect the full HTML coverage report."
+            echo ""
+            if [ -f coverage-files-table.md ]; then
+              cat coverage-files-table.md
+            else
+              echo "Coverage by file table is unavailable."
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
