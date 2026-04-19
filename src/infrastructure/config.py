@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     app_env: str = "development"
     app_port: int = 8000
     base_url: str  # Requerida en .env (ej: http://localhost:8000, ngrok tunnel en dev, https://api.example.com en prod)
-    frontend_url: str  # Requerida en .env (ej: http://localhost:3000)
+    frontend_url: str = "http://localhost:3000"  # Default para desarrollo/tests
 
     # Supabase
     supabase_url: str
