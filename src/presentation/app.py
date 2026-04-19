@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from src.infrastructure.config import settings
 from src.presentation.api.v1.auth import router as auth_router
 from src.presentation.api.v1.health import router as health_router
 from src.presentation.api.v1.ivr_architectures import router as ivr_architectures_router
@@ -31,7 +32,7 @@ def create_app() -> FastAPI:
     # IMPORTANT: CORS middleware MUST be added last to ensure it wraps all responses
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:3000"],  # frontend dev
+        allow_origins=[settings.frontend_url],  # From FRONTEND_URL env var
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
