@@ -96,6 +96,7 @@ class TestListTestExecutionsEndpoint:
                     status="PASSED",
                     duration_seconds=12,
                     provider_call_sid="CA123",
+                    full_call_transcript="Hola",
                     executed_at=datetime(2025, 1, 2, 12, 0, 0),
                     test_case=test_case,
                     logs=[
@@ -131,6 +132,7 @@ class TestListTestExecutionsEndpoint:
                 assert payload["test_case"]["id"] == test_case_id
                 assert payload["test_case"]["ivr_architecture"]["name"] == "Ventas IVR"
                 assert len(payload["logs"]) == 1
+                assert payload["logs"][0]["matched_excerpt"] == "Hola"
 
     def test_scenario_2_missing_jwt_token(self, test_client):
         """Escenario: debe rechazar sin token."""

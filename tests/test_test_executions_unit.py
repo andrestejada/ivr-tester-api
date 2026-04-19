@@ -120,6 +120,131 @@ class TestGetTestExecutionDetailsUseCase:
         assert result.test_case.id == test_case.id
         assert result.test_case.ivr_architecture.name == "Ventas IVR"
         assert len(result.logs) == 1
+        assert result.logs[0].matched_excerpt == "Hola"
+
+    @pytest.mark.asyncio
+    async def test_execute_extracts_best_excerpt_for_passed_step(self):
+        from datetime import datetime
+        from types import SimpleNamespace
+
+        ivr_architecture = SimpleNamespace(
+            id=UUID("550e8400-e29b-41d4-a716-446655440120"),
+            user_id=UUID("550e8400-e29b-41d4-a716-446655440130"),
+            name="Ventas IVR",
+            phone_number="+1234567890",
+            provider="twilio",
+            description="Test architecture",
+            created_at=datetime(2025, 1, 1),
+        )
+
+        test_case = SimpleNamespace(
+            id=UUID("550e8400-e29b-41d4-a716-446655440110"),
+            ivr_architecture_id=ivr_architecture.id,
+            name="Flujo 1",
+            flow_script=[{"step": 1, "listen": "nuestro menú ha cambiado por favor escuche atentamente las opciones", "action": None}],
+            created_at=datetime(2025, 1, 1),
+            ivr_architecture=ivr_architecture,
+        )
+
+        execution_model = SimpleNamespace(
+            id=UUID("550e8400-e29b-41d4-a716-446655440111"),
+            test_case_id=test_case.id,
+            status="PASSED",
+            duration_seconds=9,
+            provider_call_sid="CA456",
+            full_call_transcript="transcript",
+            executed_at=datetime(2025, 1, 2, 12, 0, 0),
+            test_case=test_case,
+            logs=[
+                SimpleNamespace(
+                    id=UUID("550e8400-e29b-41d4-a716-446655440121"),
+                    execution_id=UUID("550e8400-e29b-41d4-a716-446655440111"),
+                    step_number=2,
+                    expected_text="nuestro menú ha cambiado por favor escuche atentamente las opciones",
+                    actual_transcription=(
+                        "apreciado usuario por favor tenga a mano el número de suscriptor "
+                        "nuestro menú ha cambiado por favor escuche atentamente las opciones"
+                    ),
+                    confidence_score=100.0,
+                    action_taken="No action (passive step)",
+                    created_at=datetime(2025, 1, 2, 12, 0, 1),
+                )
+            ],
+        )
+
+        class FakeDetailsRepo:
+            async def get_by_id_with_details(self, execution_id):
+                return execution_model
+
+        from src.application.use_cases.get_test_execution_details_use_case import GetTestExecutionDetailsUseCase
+
+        use_case = GetTestExecutionDetailsUseCase(FakeDetailsRepo())
+        result = await use_case.execute(execution_id=execution_model.id)
+
+        assert len(result.logs) == 1
+        assert (
+            result.logs[0].matched_excerpt
+            == "nuestro menú ha cambiado por favor escuche atentamente las opciones"
+        )
+
+    @pytest.mark.asyncio
+    async def test_execute_keeps_excerpt_empty_for_failed_step(self):
+        from datetime import datetime
+        from types import SimpleNamespace
+
+        ivr_architecture = SimpleNamespace(
+            id=UUID("550e8400-e29b-41d4-a716-446655440220"),
+            user_id=UUID("550e8400-e29b-41d4-a716-446655440230"),
+            name="Ventas IVR",
+            phone_number="+1234567890",
+            provider="twilio",
+            description="Test architecture",
+            created_at=datetime(2025, 1, 1),
+        )
+
+        test_case = SimpleNamespace(
+            id=UUID("550e8400-e29b-41d4-a716-446655440210"),
+            ivr_architecture_id=ivr_architecture.id,
+            name="Flujo 1",
+            flow_script=[{"step": 1, "listen": "texto esperado", "action": None}],
+            created_at=datetime(2025, 1, 1),
+            ivr_architecture=ivr_architecture,
+        )
+
+        execution_model = SimpleNamespace(
+            id=UUID("550e8400-e29b-41d4-a716-446655440211"),
+            test_case_id=test_case.id,
+            status="FAILED",
+            duration_seconds=30,
+            provider_call_sid="CA789",
+            full_call_transcript="transcript",
+            executed_at=datetime(2025, 1, 2, 12, 0, 0),
+            test_case=test_case,
+            logs=[
+                SimpleNamespace(
+                    id=UUID("550e8400-e29b-41d4-a716-446655440221"),
+                    execution_id=UUID("550e8400-e29b-41d4-a716-446655440211"),
+                    step_number=1,
+                    expected_text="texto esperado",
+                    actual_transcription="texto completamente distinto",
+                    confidence_score=30.0,
+                    action_taken="Failed text match",
+                    created_at=datetime(2025, 1, 2, 12, 0, 1),
+                )
+            ],
+        )
+
+        class FakeDetailsRepo:
+            async def get_by_id_with_details(self, execution_id):
+                return execution_model
+
+        from src.application.use_cases.get_test_execution_details_use_case import GetTestExecutionDetailsUseCase
+
+        use_case = GetTestExecutionDetailsUseCase(FakeDetailsRepo())
+        result = await use_case.execute(execution_id=execution_model.id)
+
+        assert len(result.logs) == 1
+        assert result.logs[0].matched_excerpt is None
 
 
 class TestGetExecutionAnalyticsUseCase:

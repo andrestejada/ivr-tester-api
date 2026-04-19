@@ -15,6 +15,7 @@ class ExecutionLogResponse(BaseModel):
     step_number: int
     expected_text: str | None
     actual_transcription: str | None
+    matched_excerpt: str | None = None
     confidence_score: Decimal | None
     action_taken: str | None
     created_at: datetime
