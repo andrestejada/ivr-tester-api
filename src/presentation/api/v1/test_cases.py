@@ -9,12 +9,14 @@ from src.infrastructure.auth.dependencies import get_current_user
 from src.presentation.api.v1.schemas.test_case import CreateTestCaseRequest, UpdateTestCaseRequest
 from src.application.use_cases import (
     CreateTestCaseUseCase,
+    DeleteTestCaseUseCase,
     ListTestCasesUseCase,
     UpdateTestCaseUseCase,
 )
 from src.application.dtos import TestCaseResponse
 from src.presentation.dependencies import (
     get_create_test_case_use_case,
+    get_delete_test_case_use_case,
     get_list_test_cases_use_case,
     get_update_test_case_use_case,
 )
@@ -98,6 +100,32 @@ async def update_test_case(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=str(e)
+        )
+
+
+@router.delete(
+    "/{ivr_architecture_id}/test-cases/{test_case_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_test_case(
+    ivr_architecture_id: UUID,
+    test_case_id: UUID,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    use_case: Annotated[DeleteTestCaseUseCase, Depends(get_delete_test_case_use_case)],
+):
+    """Elimina un Test Case y todos sus datos relacionados."""
+    user_id = current_user.get("id")
+
+    try:
+        await use_case.execute(
+            architecture_id=ivr_architecture_id,
+            test_case_id=test_case_id,
+            user_id=user_id,
+        )
+    except NotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Test Case not found",
         )
 
 

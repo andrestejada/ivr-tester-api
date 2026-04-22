@@ -50,8 +50,14 @@ class IVRArchitectureRepository(IIVRArchitectureRepository):
         models = result.scalars().all()
         return [self._to_entity(m) for m in models]
 
-    async def delete(self, architecture_id: UUID) -> None:
-        model = await self.session.get(IVRArchitectureModel, architecture_id)
+    async def delete(self, architecture_id: UUID, user_id: UUID) -> None:
+        result = await self.session.execute(
+            select(IVRArchitectureModel).where(
+                (IVRArchitectureModel.id == architecture_id)
+                & (IVRArchitectureModel.user_id == user_id)
+            )
+        )
+        model = result.scalars().first()
         if not model:
             raise NotFoundError(f"IVR Architecture {architecture_id} not found")
         await self.session.delete(model)

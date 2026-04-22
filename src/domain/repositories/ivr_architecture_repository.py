@@ -29,7 +29,7 @@ class IIVRArchitectureRepository(ABC):
         pass
 
     @abstractmethod
-    async def delete(self, architecture_id: UUID) -> None:
+    async def delete(self, architecture_id: UUID, user_id: UUID) -> None:
         """Elimina una IVR Architecture."""
         pass
 

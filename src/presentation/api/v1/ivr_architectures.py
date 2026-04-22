@@ -10,6 +10,7 @@ from src.presentation.api.v1.schemas.ivr_architecture import (
 )
 from src.application.use_cases import (
     CreateIVRArchitectureUseCase,
+    DeleteIVRArchitectureUseCase,
     ListIVRArchitecturesUseCase,
     UpdateIVRArchitectureUseCase,
 )
@@ -17,6 +18,7 @@ from src.application import IVRArchitectureResponse, UpdateIVRArchitectureRespon
 from src.application.exceptions import NotFoundError
 from src.presentation.dependencies import (
     get_create_ivr_architecture_use_case,
+    get_delete_ivr_architecture_use_case,
     get_list_ivr_architectures_use_case,
     get_update_ivr_architecture_use_case,
 )
@@ -72,4 +74,24 @@ async def update_ivr_architecture(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="IVR Architecture not found"
+        )
+
+
+@router.delete("/{architecture_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_ivr_architecture(
+    architecture_id: UUID,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    use_case: Annotated[
+        DeleteIVRArchitectureUseCase,
+        Depends(get_delete_ivr_architecture_use_case),
+    ],
+):
+    user_id = current_user.get("id")
+
+    try:
+        await use_case.execute(architecture_id=architecture_id, user_id=user_id)
+    except NotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="IVR Architecture not found",
         )

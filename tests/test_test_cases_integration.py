@@ -4,6 +4,9 @@ import pytest
 from unittest.mock import AsyncMock, patch
 from uuid import UUID
 
+from src.application.exceptions import NotFoundError
+from src.presentation.dependencies import get_delete_test_case_use_case
+
 
 class TestCreateTestCaseEndpoint:
     """Tests para el endpoint POST /ivr-architectures/{id}/test-cases."""
@@ -358,6 +361,54 @@ class TestUpdateTestCaseEndpoint:
 
                 assert response.status_code == 204
                 mock_repo.update.assert_called_once()
+
+
+class TestDeleteTestCaseEndpoint:
+    def test_scenario_1_delete_successfully(self, test_client, valid_token):
+        mock_use_case = AsyncMock()
+        mock_use_case.execute = AsyncMock(return_value=None)
+
+        test_client.app.dependency_overrides[get_delete_test_case_use_case] = (
+            lambda: mock_use_case
+        )
+        try:
+            ivr_id = UUID("550e8400-e29b-41d4-a716-446655440000")
+            test_case_id = UUID("550e8400-e29b-41d4-a716-446655440001")
+            response = test_client.delete(
+                f"/api/v1/ivr-architectures/{ivr_id}/test-cases/{test_case_id}",
+                headers={"Authorization": f"Bearer {valid_token}"},
+            )
+
+            assert response.status_code == 204
+            mock_use_case.execute.assert_called_once()
+        finally:
+            test_client.app.dependency_overrides.pop(
+                get_delete_test_case_use_case,
+                None,
+            )
+
+    def test_scenario_2_delete_not_found(self, test_client, valid_token):
+        mock_use_case = AsyncMock()
+        mock_use_case.execute = AsyncMock(side_effect=NotFoundError("not found"))
+
+        test_client.app.dependency_overrides[get_delete_test_case_use_case] = (
+            lambda: mock_use_case
+        )
+        try:
+            ivr_id = UUID("550e8400-e29b-41d4-a716-446655440000")
+            test_case_id = UUID("550e8400-e29b-41d4-a716-446655440001")
+            response = test_client.delete(
+                f"/api/v1/ivr-architectures/{ivr_id}/test-cases/{test_case_id}",
+                headers={"Authorization": f"Bearer {valid_token}"},
+            )
+
+            assert response.status_code == 404
+            assert response.json()["detail"] == "Test Case not found"
+        finally:
+            test_client.app.dependency_overrides.pop(
+                get_delete_test_case_use_case,
+                None,
+            )
 
     def test_scenario_4_test_case_not_in_architecture(self, test_client, valid_token):
         """Escenario 4: Test case no pertenece a la arquitectura."""
