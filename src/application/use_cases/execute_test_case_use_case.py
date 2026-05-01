@@ -613,6 +613,11 @@ class ExecuteTestCaseUseCase:
                         and best_ratio >= PASSIVE_TIMEOUT_FALLBACK_RATIO
                     )
                     if is_passive_timeout_candidate:
+                        matched_excerpt, remaining_text = self._extract_matched_excerpt_and_remainder(
+                            expected_text,
+                            current_full_text or "",
+                        )
+                        consumed_text = matched_excerpt or current_full_text or ""
                         fallback_confidence = Decimal(str(best_ratio * 100)).quantize(Decimal("0.01"))
                         logger.warning(
                             f"Step {step_number}: Passive timeout fallback accepted | "
@@ -623,7 +628,7 @@ class ExecuteTestCaseUseCase:
                             step_matched_event = ExecutionEvent.step_matched(
                                 execution_id,
                                 step_number,
-                                current_full_text or "",
+                                consumed_text,
                                 float(fallback_confidence),
                             )
                             await self.event_hub.publish(step_matched_event)
@@ -634,7 +639,7 @@ class ExecuteTestCaseUseCase:
                             execution_id,
                             step_number,
                             expected_text,
-                            current_full_text or None,
+                            consumed_text or None,
                             fallback_confidence,
                             (
                                 "No action (passive step - timeout fallback accepted: "
@@ -642,7 +647,7 @@ class ExecuteTestCaseUseCase:
                             ),
                             execution_log_repo=execution_log_repo,
                         )
-                        state_machine.advance_to_next_step(current_full_text or "")
+                        state_machine.advance_to_next_step(consumed_text, remaining_text or "")
                         continue
 
                     await _fail_current_step(
@@ -1121,6 +1126,18 @@ class ExecuteTestCaseUseCase:
                 f"  Full comparison ratio={best_ratio:.2%} "
                 f"(char={full_char_ratio:.2%}, token={full_token_ratio:.2%}, coverage={full_coverage_ratio:.2%})"
             )
+
+        if len(words_exp) >= 10:
+            expected_unique_tokens = set(words_exp)
+            candidate_unique_tokens = set(words_trans)
+            unordered_coverage_ratio = len(expected_unique_tokens & candidate_unique_tokens) / len(expected_unique_tokens)
+            if unordered_coverage_ratio > best_ratio:
+                best_ratio = unordered_coverage_ratio
+                best_metric = "unordered_token_coverage"
+                logger.debug(
+                    f"  Unordered coverage ratio={unordered_coverage_ratio:.2%} "
+                    f"(unique_expected={len(expected_unique_tokens)}, unique_candidate={len(candidate_unique_tokens)})"
+                )
         
         confidence = Decimal(str(best_ratio * 100)).quantize(Decimal("0.01"))
         is_match = best_ratio >= threshold
@@ -1236,12 +1253,110 @@ class ExecuteTestCaseUseCase:
             action_taken=action_taken,
             created_at=datetime.now(timezone.utc),
         )
-        
         try:
             await execution_log_repo.create(log)
             logger.debug(f"Step {step_number}: [DB] ✓ Execution log created and persisted")
         except Exception as e:
             logger.error(f"Step {step_number}: [DB] ✗ Failed to persist execution log | error={str(e)}", exc_info=True)
+
+    def _tokenize_actual_with_raw_index(self, text: str) -> list[tuple[str, int]]:
+        """Tokenize a transcription while preserving the raw token position."""
+        raw_tokens = text.split()
+        tokens_with_index: list[tuple[str, int]] = []
+
+        for raw_index, raw_token in enumerate(raw_tokens):
+            normalized = self._normalize_similarity_text(raw_token)
+            if not normalized:
+                continue
+            for token in normalized.split():
+                if token in SIMILARITY_STOPWORDS:
+                    continue
+                tokens_with_index.append((token, raw_index))
+
+        return tokens_with_index
+
+    def _extract_matched_excerpt_and_remainder(
+        self,
+        expected_text: str,
+        actual_transcription: str,
+    ) -> tuple[str | None, str | None]:
+        """Extract the best matching excerpt and the leftover transcript tail."""
+        expected_clean = expected_text.strip()
+        actual_clean = actual_transcription.strip()
+        if not expected_clean or not actual_clean:
+            return None, None
+
+        lower_actual = actual_clean.lower()
+        lower_expected = expected_clean.lower()
+        literal_start = lower_actual.find(lower_expected)
+        if literal_start != -1:
+            literal_end = literal_start + len(expected_clean)
+            excerpt = actual_clean[literal_start:literal_end].strip() or None
+            remainder = actual_clean[literal_end:].strip() or None
+            return excerpt, remainder
+
+        expected_tokens = self._tokenize_for_similarity(expected_clean)
+        actual_tokens_with_raw_index = self._tokenize_actual_with_raw_index(actual_clean)
+        if not expected_tokens or not actual_tokens_with_raw_index:
+            return None, None
+
+        actual_tokens = [token for token, _ in actual_tokens_with_raw_index]
+        raw_tokens = actual_clean.split()
+        window_size = len(expected_tokens)
+
+        best_ratio = 0.0
+        best_window_start = 0
+        best_window_end = 0
+
+        if len(actual_tokens) >= window_size and window_size > 0:
+            for idx in range(len(actual_tokens) - window_size + 1):
+                candidate_tokens = actual_tokens[idx:idx + window_size]
+
+                char_ratio = SequenceMatcher(
+                    None,
+                    " ".join(expected_tokens),
+                    " ".join(candidate_tokens),
+                    autojunk=False,
+                ).ratio()
+                token_ratio = SequenceMatcher(
+                    None,
+                    expected_tokens,
+                    candidate_tokens,
+                    autojunk=False,
+                ).ratio()
+                coverage_ratio = self._ordered_token_coverage(expected_tokens, candidate_tokens)
+                ratio = max(char_ratio, token_ratio, coverage_ratio)
+
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_window_start = idx
+                    best_window_end = idx + window_size
+        else:
+            char_ratio = SequenceMatcher(
+                None,
+                " ".join(expected_tokens),
+                " ".join(actual_tokens),
+                autojunk=False,
+            ).ratio()
+            token_ratio = SequenceMatcher(
+                None,
+                expected_tokens,
+                actual_tokens,
+                autojunk=False,
+            ).ratio()
+            coverage_ratio = self._ordered_token_coverage(expected_tokens, actual_tokens)
+            best_ratio = max(char_ratio, token_ratio, coverage_ratio)
+            best_window_start = 0
+            best_window_end = len(actual_tokens)
+
+        if best_ratio <= 0.0 or best_window_end <= best_window_start:
+            return None, None
+
+        raw_start = actual_tokens_with_raw_index[best_window_start][1]
+        raw_end = actual_tokens_with_raw_index[best_window_end - 1][1]
+        excerpt = " ".join(raw_tokens[raw_start:raw_end + 1]).strip() or None
+        remainder = " ".join(raw_tokens[raw_end + 1:]).strip() or None
+        return excerpt, remainder
 
     async def _record_step_failure(
         self,

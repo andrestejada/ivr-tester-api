@@ -23,7 +23,7 @@ from src.infrastructure.logger import get_logger
 logger = get_logger(__name__)
 
 # Timeouts y thresholds
-STEP_TIMEOUT_SECONDS = 30.0  # Máximo tiempo esperando el texto de un step
+STEP_TIMEOUT_SECONDS = 45.0  # Máximo tiempo esperando el texto de un step; margen extra para ASR tardío en prompts largos
 SILENCE_THRESHOLD_SECONDS = 5.0  # Silencio de 5s indica fin del step (no hay más opciones)
 EARLY_EXIT_SILENCE_SECONDS = 1.0
 STREAM_POLL_SECONDS = 0.5
@@ -369,24 +369,24 @@ class IVRStateMachine:
         
         return False
     
-    def advance_to_next_step(self, matched_text: str) -> None:
+    def advance_to_next_step(self, matched_text: str, remaining_text: str = "") -> None:
         """Avanza la máquina de estados al siguiente step.
         
         Args:
             matched_text: Texto que fue reconocido (para actualizar transcript global)
+            remaining_text: Texto sobrante que ya pertenece al siguiente step
         """
         # 1. Actualizar transcript global (apenas identificamos el match)
         self.state.full_call_transcript += matched_text + " "
         
-        # 2. Guardar la transcripción actual como referencia para detectar repeticiones
-        current_full_text = self.get_full_text_buffer()
-        self.state.previous_step_transcript = current_full_text
+        # 2. Guardar el texto consumido como referencia para detectar repeticiones
+        self.state.previous_step_transcript = matched_text
         
         # 3. Avanzar al siguiente step
         self.state.current_step_index += 1
         
         # 4. Resetear estado para nuevo step
-        self.state.transcript_parts = []  # Limpiar parts (opcionalmente, depende de si queremos preservar)
+        self.state.transcript_parts = [remaining_text] if remaining_text else []
         self.state.current_partial = ""
         self.state.step_start_time = time()
         self.state.last_text_time = time()

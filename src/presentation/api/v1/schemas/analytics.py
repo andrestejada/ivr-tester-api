@@ -40,15 +40,26 @@ class ExecutionAnalyticsQuery(BaseModel):
 
     @field_validator("date_from", "date_to", mode="before")
     @classmethod
-    def parse_datetime(cls, v):
+    def parse_datetime(cls, v, info):
         """Allow string datetime parsing."""
         if v is None:
             return None
         if isinstance(v, datetime):
             return v
         if isinstance(v, str):
+            raw = v.strip()
+            if not raw:
+                return None
+
+            is_date_only = len(raw) == 10 and raw[4] == "-" and raw[7] == "-"
+            if is_date_only:
+                year, month, day = (int(part) for part in raw.split("-"))
+                if info.field_name == "date_to":
+                    return datetime(year, month, day, 23, 59, 59, 999999)
+                return datetime(year, month, day)
+
             # Try ISO format
-            return datetime.fromisoformat(v)
+            return datetime.fromisoformat(raw)
         raise ValueError(f"Invalid datetime: {v}")
 
     @field_validator("date_to")

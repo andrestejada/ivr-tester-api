@@ -765,6 +765,18 @@ class TestExecuteTestCaseSimilarityHelpers:
         assert use_case._ordered_token_coverage([], ["hola"]) == 0.0
         assert use_case._ordered_token_coverage(["hola"], []) == 0.0
 
+    def test_extract_matched_excerpt_and_remainder_preserves_tail(self, use_case):
+        expected = "bienvenido a ucompensar para efectos de la calidad en el servicio"
+        actual = (
+            "bienvenido a ucompensar para efectos de la calidad en el servicio "
+            "si estás interesado en conocer nuestros programas académicos marca uno"
+        )
+
+        excerpt, remainder = use_case._extract_matched_excerpt_and_remainder(expected, actual)
+
+        assert excerpt == "bienvenido a ucompensar para efectos de la calidad en el servicio"
+        assert remainder == "si estás interesado en conocer nuestros programas académicos marca uno"
+
     def test_evaluate_transcription_fast_path_exact_substring(self, use_case):
         ratio, confidence, is_match = use_case._evaluate_transcription(
             expected_text="para ventas marque 2",
@@ -803,6 +815,50 @@ class TestExecuteTestCaseSimilarityHelpers:
         assert ratio_low == pytest.approx(ratio)
         assert is_match_high is False
         assert is_match_low is True
+
+    def test_evaluate_transcription_handles_real_ivr_paraphrase_at_85_percent(self, use_case):
+        expected = (
+            "Si te comunicas de una empresa, eres estudiante activo y requieres "
+            "orientación relacionada con tu proceso académico, marca uno"
+        )
+        transcription = (
+            "seguido del número de la extensión o si lo prefieres espera en línea para ser transferido "
+            "a uno de nuestros agentes de servicio eres estudiante activo y requieres orientación "
+            "relacionada con tu proceso académico marca uno te comunicas en nombre de una empresa"
+        )
+
+        ratio, confidence, is_match = use_case._evaluate_transcription(
+            expected_text=expected,
+            transcription=transcription,
+            threshold=0.85,
+        )
+
+        assert ratio >= 0.85
+        assert confidence == Decimal(str(ratio * 100)).quantize(Decimal("0.01"))
+        assert is_match is True
+
+    def test_evaluate_transcription_matches_apoyo_financiero_menu_at_85_percent(self, use_case):
+        expected = (
+            "Si tienes consultas sobre la inscripción, el proceso de admisión y o sobre "
+            "temas de apoyo financiero, marca cuatro"
+        )
+        transcription = (
+            "si eres estudiante empresario graduado o para información sobre carreras profesionales "
+            "o técnicos laborales marca uno para información sobre programas técnicos laborales "
+            "marca dos para información sobre posgrados marca tres si tienes consultas sobre la "
+            "inscripción el proceso de admisión y o sobre temas de apoyo financiero continua marca "
+            "cinco para regresar al menú anterior marca seis"
+        )
+
+        ratio, confidence, is_match = use_case._evaluate_transcription(
+            expected_text=expected,
+            transcription=transcription,
+            threshold=0.85,
+        )
+
+        assert ratio >= 0.85
+        assert confidence == Decimal(str(ratio * 100)).quantize(Decimal("0.01"))
+        assert is_match is True
 
 
 class TestExecuteTestCaseCriticalFlowHelpers:

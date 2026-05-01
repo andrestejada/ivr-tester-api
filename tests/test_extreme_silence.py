@@ -59,6 +59,19 @@ class TestExtremeSilenceStateMachine:
 
         assert machine.check_step_timeout() is True
 
+    def test_step_timeout_not_triggered_with_reasonable_extra_time(self):
+        """State machine should tolerate a modest extra wait for long prompts."""
+        from time import time as get_time
+
+        def mock_evaluate(expected, transcribed, threshold=0.8):
+            return (0.4, Decimal("40"), False)
+
+        flow_script = [{"step": 1, "listen": "Test", "action": "1"}]
+        machine = IVRStateMachine(flow_script, mock_evaluate)
+        machine.state.step_start_time = get_time() - 31.0
+
+        assert machine.check_step_timeout() is False
+
     def test_step_stagnation_detected_for_low_ratio(self):
         """State machine should detect low-ratio stagnation after no progress window."""
         from time import time as get_time

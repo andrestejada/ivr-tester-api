@@ -30,11 +30,11 @@ async def get_execution_analytics(
         default=None,
         description="Optional test case UUID to filter analytics by.",
     ),
-    date_from: datetime | None = Query(
+    date_from: str | None = Query(
         default=None,
         description="Start date (ISO8601). Defaults to 7 days ago.",
     ),
-    date_to: datetime | None = Query(
+    date_to: str | None = Query(
         default=None,
         description="End date (ISO8601). Defaults to now.",
     ),

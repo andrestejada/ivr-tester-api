@@ -289,7 +289,7 @@ class TestStateMachineUncoveredBranches:
 
         assert is_repeated is False
 
-    def test_advance_to_next_step_resets_step_state(self):
+    def test_advance_to_next_step_preserves_remaining_transcript(self):
         evaluate_fn = Mock(return_value=(0.9, Decimal("90"), True))
         machine = IVRStateMachine(
             [
@@ -301,12 +301,12 @@ class TestStateMachineUncoveredBranches:
         machine.state.transcript_parts = ["hola"]
         machine.state.current_partial = "menu"
 
-        machine.advance_to_next_step("hola")
+        machine.advance_to_next_step("hola", remaining_text="menu de opciones")
 
         assert machine.state.current_step_index == 1
         assert machine.state.full_call_transcript.strip() == "hola"
-        assert machine.state.previous_step_transcript == "hola menu"
-        assert machine.state.transcript_parts == []
+        assert machine.state.previous_step_transcript == "hola"
+        assert machine.state.transcript_parts == ["menu de opciones"]
         assert machine.state.current_partial == ""
         assert machine.state.transcript_final_event.is_set() is False
 
