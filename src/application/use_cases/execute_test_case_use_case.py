@@ -9,6 +9,7 @@ from time import time
 from uuid import UUID
 from typing import Callable, Optional
 import unicodedata
+import socket
 
 from sqlalchemy.exc import PendingRollbackError
 
@@ -20,7 +21,7 @@ from src.domain.ports.call_provider import ICallProvider
 from src.domain.repositories.execution_log_repository import IExecutionLogRepository
 from src.domain.repositories.test_case_repository import ITestCaseRepository
 from src.domain.repositories.test_execution_repository import ITestExecutionRepository
-from src.application.exceptions import NotFoundError
+from src.application.exceptions import NotFoundError, ExternalDependencyError
 from src.application.dtos.realtime_events import ExecutionEvent
 from src.application.services.ivr_state_machine import (
     IVRStateMachine,
@@ -32,7 +33,13 @@ from src.application.services.ivr_state_machine import (
     EARLY_EXIT_THRESHOLD,
     EARLY_EXIT_SILENCE_SECONDS,
 )
-from src.application.utils.error_utils import sanitize_error_message, get_user_friendly_error_message
+from src.application.utils.error_utils import (
+    classify_error_category,
+    extract_deepgram_error_metadata,
+    format_log_fields,
+    get_user_friendly_error_message,
+    sanitize_error_message,
+)
 from src.infrastructure.call_session_store import CallSessionStore
 from src.infrastructure.database.uow import UnitOfWork
 from src.infrastructure.logger import get_logger
@@ -95,6 +102,63 @@ class ExecuteTestCaseUseCase:
         self.event_hub = event_hub
         self.uow_factory = uow_factory
 
+    async def _check_network_preflight(self) -> None:
+        """Check network dependencies before starting execution."""
+        hosts_to_check = ["api.deepgram.com", "api.twilio.com"]
+        max_attempts = 3
+        base_delay_seconds = 0.2
+        for host in hosts_to_check:
+            last_error: Exception | None = None
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    # Resolve host to verify DNS/network
+                    loop = asyncio.get_running_loop()
+                    await loop.getaddrinfo(host, 443)
+                    if attempt > 1:
+                        logger.info(
+                            "Preflight network check recovered"
+                            f" | {format_log_fields({'host': host, 'attempt': attempt, 'max_attempts': max_attempts})}"
+                        )
+                    last_error = None
+                    break
+                except Exception as e:
+                    last_error = e
+                    error_category = classify_error_category(e)
+                    retryable = isinstance(e, socket.gaierror) or error_category in {
+                        "network",
+                        "timeout",
+                        "unavailable",
+                    }
+                    delay_seconds = base_delay_seconds * (2 ** (attempt - 1))
+                    log_fields = format_log_fields(
+                        {
+                            "host": host,
+                            "attempt": attempt,
+                            "max_attempts": max_attempts,
+                            "delay_ms": int(delay_seconds * 1000),
+                            "error_category": error_category,
+                        }
+                    )
+                    if attempt < max_attempts and retryable:
+                        logger.warning(
+                            "Preflight network check failed, retrying"
+                            f" | {log_fields} error={sanitize_error_message(e)}"
+                        )
+                        await asyncio.sleep(delay_seconds)
+                        continue
+
+                    logger.error(
+                        "Preflight network check failed, aborting"
+                        f" | {log_fields} error={sanitize_error_message(e)}"
+                    )
+                    break
+
+            if last_error is not None:
+                raise ExternalDependencyError(
+                    f"Error de red: No se pudo contactar al proveedor de telefonía u transcripción ({host}). "
+                    f"Revisa tu conexión a internet o los servidores DNS."
+                )
+
     async def execute(
         self, test_case_id: UUID, phone_number: str, webhook_url: str
     ) -> TestExecutionEntity:
@@ -104,6 +168,9 @@ class ExecuteTestCaseUseCase:
         """
         logger.info(f"Starting test case execution setup: {test_case_id}")
         
+        # 0. Preflight checks - early fail on DNS / Network issues
+        await self._check_network_preflight()
+
         # 1. Obtener test case
         try:
             test_case = await self.test_case_repo.get_by_id(test_case_id)
@@ -225,6 +292,7 @@ class ExecuteTestCaseUseCase:
         start_time: float,
     ) -> None:
         """Procesa la orquestación con repositorios y sesión explícitos."""
+        asr_connected = False
         # 1. Iniciar llamada
         try:
             call_session = await self.call_provider.initiate_call(
@@ -237,7 +305,17 @@ class ExecuteTestCaseUseCase:
             )
             logger.info(f"Call initiated and persisted: {call_session.call_sid}")
         except Exception as e:
-            logger.error(f"Error initiating call: {e}")
+            self._log_flow_error(
+                "Call initiation failed",
+                level="error",
+                error_type="provider",
+                provider="twilio",
+                operation="initiate_call",
+                execution_id=str(execution.id),
+                test_case_id=str(execution.test_case_id),
+                error_category=classify_error_category(e),
+                error_message=str(e),
+            )
             duration = int(time() - start_time)
             try:
                 await test_execution_repo.update_status(
@@ -306,12 +384,20 @@ class ExecuteTestCaseUseCase:
                 wait_time += 1.0
 
             if not session_active:
+                self._log_flow_error(
+                    "Call session timeout",
+                    level="error",
+                    error_type="flow",
+                    reason_code="call_session_timeout",
+                    execution_id=str(execution.id),
+                    call_sid=call_session.call_sid,
+                    waited_seconds=wait_time,
+                )
                 raise TimeoutError("Call was not answered or webhook was not received in time.")
             
             logger.info("Call answered and session active. Beginning step execution.")
 
             # Conexión ASR persistente para todo el test case
-            asr_connected = False
             try:
                 logger.info("ASR: Conectando Deepgram para todo el flujo de pasos...")
                 await self.asr_provider.connect(
@@ -322,7 +408,20 @@ class ExecuteTestCaseUseCase:
                 asr_connected = True
                 logger.info("ASR: Conexión Deepgram establecida (persistente)")
             except Exception as e:
-                logger.error(f"ASR: Falló conexión persistente antes de ejecutar pasos: {e}")
+                metadata = extract_deepgram_error_metadata(e)
+                self._log_flow_error(
+                    "ASR connect failed",
+                    level="error",
+                    error_type="provider",
+                    provider="deepgram",
+                    operation="connect",
+                    reason_code="asr_connect_failed",
+                    execution_id=str(execution.id),
+                    call_sid=call_session.call_sid,
+                    error_category=classify_error_category(e),
+                    error_message=str(e),
+                    **metadata,
+                )
                 raise
 
             # 2b. Lanzar monitor de inactividad de audio en background
@@ -376,7 +475,15 @@ class ExecuteTestCaseUseCase:
             )
 
         except Exception as e:
-            logger.error(f"Execution error general: {e}", exc_info=True)
+            self._log_flow_error(
+                "Execution error",
+                level="error",
+                error_type="flow",
+                reason_code="background_exception",
+                execution_id=str(execution.id),
+                error_category=classify_error_category(e),
+                error_message=str(e),
+            )
             duration = int(time() - start_time)
             
             # Actualizar estado en BD
@@ -474,15 +581,18 @@ class ExecuteTestCaseUseCase:
             expected_text: str,
             actual_text: str | None,
             reason: str,
+            reason_code: str,
             confidence: Decimal = Decimal("0.00"),
         ) -> None:
             """Persist and publish a terminal step failure before aborting flow."""
             await self._record_step_failure(
                 execution_id=execution_id,
+                call_sid=call_sid,
                 step_number=step_number,
                 expected_text=expected_text,
                 actual_text=actual_text,
                 reason=reason,
+                reason_code=reason_code,
                 confidence=confidence,
                 execution_log_repo=execution_log_repo,
             )
@@ -515,6 +625,7 @@ class ExecuteTestCaseUseCase:
                         expected_text=expected_text,
                         actual_text=state_machine.get_full_text_buffer() or None,
                         reason="Call session ended before completing step",
+                        reason_code="call_session_ended",
                     )
                     all_passed = False
                     break
@@ -555,6 +666,7 @@ class ExecuteTestCaseUseCase:
                                 expected_text=expected_text,
                                 actual_text=match_result.matched_text,
                                 reason=action_log,
+                                reason_code="dtmf_error",
                                 confidence=match_result.confidence,
                             )
                             all_passed = False
@@ -594,6 +706,7 @@ class ExecuteTestCaseUseCase:
                             expected_text=expected_text,
                             actual_text=current_full_text,
                             reason="IVR repeated menu without matching expected step",
+                            reason_code="menu_repetition",
                         )
                         all_passed = False
                         break
@@ -658,6 +771,7 @@ class ExecuteTestCaseUseCase:
                             f"Step timeout exceeded: {elapsed:.1f}s >= {STEP_TIMEOUT_SECONDS}s "
                             f"(best_ratio={best_ratio:.2%})"
                         ),
+                        reason_code="step_timeout",
                         confidence=Decimal(str(best_ratio * 100)).quantize(Decimal("0.01")),
                     )
                     all_passed = False
@@ -679,6 +793,7 @@ class ExecuteTestCaseUseCase:
                             f"Step stagnated: no similarity improvement for {wait_without_progress:.1f}s "
                             f"with best_ratio={best_ratio:.2%}"
                         ),
+                        reason_code="step_stagnation",
                         confidence=Decimal(str(best_ratio * 100)).quantize(Decimal("0.01")),
                     )
                     all_passed = False
@@ -718,6 +833,7 @@ class ExecuteTestCaseUseCase:
                         expected_text=expected_text,
                         actual_text=current_full_text or None,
                         reason=f"Extreme caller silence: {silence_duration:.1f}s (threshold: {EXTREME_SILENCE_THRESHOLD_SECONDS}s)",
+                        reason_code="extreme_silence",
                     )
                     
                     # Intentar colgar la llamada de inmediato
@@ -744,6 +860,16 @@ class ExecuteTestCaseUseCase:
         
         except Exception as e:
             logger.error(f"STATE MACHINE FLOW ERROR: {e}", exc_info=True)
+            self._log_flow_error(
+                "State machine error",
+                level="error",
+                error_type="flow",
+                reason_code="state_machine_exception",
+                execution_id=str(execution_id),
+                call_sid=call_sid,
+                error_category=classify_error_category(e),
+                error_message=str(e),
+            )
             all_passed = False
 
         if all_passed and not state_machine.is_flow_complete():
@@ -1361,14 +1487,29 @@ class ExecuteTestCaseUseCase:
     async def _record_step_failure(
         self,
         execution_id: UUID,
+        call_sid: str,
         step_number: int,
         expected_text: str,
         actual_text: str | None,
         reason: str,
+        reason_code: str,
         confidence: Decimal,
         execution_log_repo: IExecutionLogRepository,
     ) -> None:
         """Persist step failure details and emit realtime failure event."""
+        self._log_flow_error(
+            "Step failed",
+            level="warning",
+            error_type="flow",
+            reason_code=reason_code,
+            execution_id=str(execution_id),
+            call_sid=call_sid,
+            step_number=step_number,
+            expected_text=expected_text,
+            actual_text=actual_text,
+            confidence=confidence,
+            error_message=reason,
+        )
         await self._log_step(
             execution_id,
             step_number,
@@ -1390,6 +1531,18 @@ class ExecuteTestCaseUseCase:
             await self.event_hub.publish(step_failed_event)
         except Exception as e:
             logger.debug(f"Error emitiendo evento step_failed: {e}")
+
+    def _log_flow_error(self, message: str, level: str = "error", **fields) -> None:
+        """Log flow or provider errors with consistent key=value fields."""
+        field_text = format_log_fields(fields)
+        log_message = f"{message} | {field_text}" if field_text else message
+
+        if level == "warning":
+            logger.warning(log_message)
+        elif level == "info":
+            logger.info(log_message)
+        else:
+            logger.error(log_message)
 
     async def _monitor_audio_inactivity(self, call_sid: str) -> None:
         """Monitor de inactividad de audio que reconecta ASR si deja de llegar audio.

@@ -26,6 +26,11 @@ from tenacity import (
 )
 
 from src.domain.ports.asr_provider import IASRProvider
+from src.application.utils.error_utils import (
+    classify_error_category,
+    extract_deepgram_error_metadata,
+    format_log_fields,
+)
 from src.infrastructure.config import Settings
 
 logger = logging.getLogger(__name__)
@@ -130,7 +135,13 @@ class DeepgramASRProvider(IASRProvider):
             logger.info("✅ Conexión Deepgram ASR establecida")
             
         except Exception as e:
-            logger.error(f"❌ Error Deepgram durante connect(): {e}")
+            error_category = classify_error_category(e)
+            metadata = extract_deepgram_error_metadata(e)
+            logger.error(
+                "Provider error while connecting Deepgram"
+                f" | {format_log_fields({'provider': 'deepgram', 'operation': 'connect', 'error_type': 'provider', 'error_category': error_category, 'error_message': str(e), **metadata})}",
+                exc_info=True,
+            )
             self._is_connected = False
             # Lanzar para que tenacity reintente
             raise
@@ -172,7 +183,13 @@ class DeepgramASRProvider(IASRProvider):
             pass
             
         except Exception as e:
-            logger.error(f"❌ Error al enviar audio a Deepgram: {e}")
+            error_category = classify_error_category(e)
+            metadata = extract_deepgram_error_metadata(e)
+            logger.error(
+                "Provider error while sending audio"
+                f" | {format_log_fields({'provider': 'deepgram', 'operation': 'send_audio', 'error_type': 'provider', 'error_category': error_category, 'error_message': str(e), **metadata})}",
+                exc_info=True,
+            )
             raise
 
     async def disconnect(self) -> None:
@@ -258,7 +275,13 @@ class DeepgramASRProvider(IASRProvider):
                         await self._transcript_handler(text, is_final)
 
         except Exception as e:
-            logger.error(f"❌ Error procesando transcripción de Deepgram: {e}")
+            error_category = classify_error_category(e)
+            metadata = extract_deepgram_error_metadata(e)
+            logger.error(
+                "Provider error while processing transcript"
+                f" | {format_log_fields({'provider': 'deepgram', 'operation': 'on_transcript', 'error_type': 'provider', 'error_category': error_category, 'error_message': str(e), **metadata})}",
+                exc_info=True,
+            )
 
     async def _on_connection_error(self, error, **kwargs) -> None:
         """Handler interno para errores de conexión de Deepgram.
@@ -269,7 +292,12 @@ class DeepgramASRProvider(IASRProvider):
             error: Objeto de error de Deepgram.
             **kwargs: Argumentos adicionales (ignorados).
         """
-        logger.error(f"❌ Error de conexión Deepgram: {error}")
+        error_category = classify_error_category(error)
+        metadata = extract_deepgram_error_metadata(error)
+        logger.error(
+            "Provider connection error"
+            f" | {format_log_fields({'provider': 'deepgram', 'operation': 'connection_error', 'error_type': 'provider', 'error_category': error_category, 'error_message': str(error), **metadata})}"
+        )
         self._is_connected = False
 
     async def transcribe(self, audio_bytes: bytes) -> str:

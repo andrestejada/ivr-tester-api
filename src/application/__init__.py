@@ -4,6 +4,7 @@ from src.application.exceptions import (
     ConflictError,
     ForbiddenError,
     BusinessValidationError,
+    ExternalDependencyError,
 )
 from src.application.use_cases.create_ivr_architecture_use_case import (
     CreateIVRArchitectureUseCase,
@@ -19,6 +20,7 @@ __all__ = [
     "ConflictError",
     "ForbiddenError",
     "BusinessValidationError",
+    "ExternalDependencyError",
     "CreateIVRArchitectureUseCase",
     "ListIVRArchitecturesUseCase",
     "IVRArchitectureResponse",
