@@ -3,6 +3,8 @@ FROM python:3.14-slim
 WORKDIR /code
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    libfreetype6 \
+    libpng16-16 \
     libpq5 \
     && rm -rf /var/lib/apt/lists/*
 

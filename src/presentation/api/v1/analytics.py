@@ -4,11 +4,17 @@ from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
+import io
+
 from fastapi import APIRouter, Depends, Query
+from fastapi.responses import StreamingResponse
 
 from src.infrastructure.auth.dependencies import get_current_user
 from src.application.use_cases import GetExecutionAnalyticsUseCase
 from src.application.dtos import AnalyticsResponse
+from src.application.services.analytics_report_pdf import (
+    build_execution_analytics_report_pdf,
+)
 from src.presentation.api.v1.schemas.analytics import ExecutionAnalyticsQuery
 from src.presentation.dependencies import get_execution_analytics_use_case
 
@@ -97,3 +103,63 @@ async def get_execution_analytics(
     )
 
     return analytics
+
+
+@router.get(
+    "/{ivr_architecture_id}/test-cases/analytics/report",
+)
+async def get_execution_analytics_report(
+    ivr_architecture_id: UUID,
+    _: Annotated[dict, Depends(get_current_user)],
+    use_case: Annotated[
+        GetExecutionAnalyticsUseCase, Depends(get_execution_analytics_use_case)
+    ],
+    test_case_id: UUID | None = Query(
+        default=None,
+        description="Optional test case UUID to filter analytics by.",
+    ),
+    date_from: str | None = Query(
+        default=None,
+        description="Start date (ISO8601). Defaults to 7 days ago.",
+    ),
+    date_to: str | None = Query(
+        default=None,
+        description="End date (ISO8601). Defaults to now.",
+    ),
+    top_n: int = Query(
+        default=10,
+        ge=1,
+        le=50,
+        description="Number of items in rankings (1-50).",
+    ),
+    include: str = Query(
+        default="summary,rankings,trend",
+        description="Comma-separated list of blocks: 'summary', 'rankings', 'trend'.",
+    ),
+):
+    """Genera un reporte PDF de analytics con los filtros actuales."""
+    query = ExecutionAnalyticsQuery(
+        test_case_id=test_case_id,
+        date_from=date_from,
+        date_to=date_to,
+        top_n=top_n,
+        include=include.split(",") if include else ["summary", "rankings", "trend"],
+    )
+
+    analytics = await use_case.execute(
+        architecture_id=ivr_architecture_id,
+        test_case_id=query.test_case_id,
+        date_from=query.date_from,
+        date_to=query.date_to,
+        top_n=query.top_n,
+        include_blocks=query.include,
+    )
+
+    pdf_bytes = build_execution_analytics_report_pdf(analytics)
+    filename = f"reporte-metricas-{ivr_architecture_id}.pdf"
+
+    return StreamingResponse(
+        io.BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{filename}"'},
+    )
