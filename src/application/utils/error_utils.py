@@ -1,6 +1,7 @@
 """Utilities for error message handling and sanitization."""
 
 import re
+from decimal import Decimal
 from typing import Any
 
 
@@ -33,6 +34,53 @@ def sanitize_error_message(error: Any, max_length: int = 255) -> str:
         sanitized = sanitized[:max_length - 3] + '...'
     
     return sanitized
+
+
+def _normalize_log_value(value: Any) -> str:
+    """Normalize a log field value without truncating."""
+    value_str = str(value)
+    value_str = value_str.replace("\n", " ").replace("\t", " ")
+    value_str = re.sub(r"\s+", " ", value_str).strip()
+    return value_str.replace('"', "'")
+
+
+def format_log_fields(fields: dict[str, Any]) -> str:
+    """Format a dictionary into a key=value log suffix."""
+    parts: list[str] = []
+    for key, value in fields.items():
+        if value is None:
+            continue
+        if isinstance(value, bool):
+            value_str = "true" if value else "false"
+        elif isinstance(value, (int, float, Decimal)):
+            value_str = str(value)
+        elif isinstance(value, (list, tuple, set)):
+            value_str = ",".join(_normalize_log_value(item) for item in value)
+        else:
+            value_str = _normalize_log_value(value)
+
+        if not value_str:
+            value_str = "\"\""
+        elif re.search(r"[\s=]", value_str):
+            value_str = f"\"{value_str}\""
+
+        parts.append(f"{key}={value_str}")
+
+    return " ".join(parts)
+
+
+def mask_phone_number(phone_number: str, keep_last: int = 4) -> str:
+    """Mask a phone number, keeping the last digits for reference."""
+    if not phone_number:
+        return phone_number
+
+    digits = re.sub(r"\D", "", phone_number)
+    if not digits:
+        return phone_number
+
+    visible = digits[-keep_last:] if keep_last > 0 else ""
+    masked = "*" * max(len(digits) - len(visible), 0) + visible
+    return f"+{masked}" if phone_number.strip().startswith("+") else masked
 
 
 def classify_error_category(error: Exception | str) -> str:
@@ -116,6 +164,35 @@ def classify_error_category(error: Exception | str) -> str:
         return 'invalid_input'
     
     return 'unknown'
+
+
+def extract_twilio_error_metadata(error: Exception) -> dict[str, Any]:
+    """Extract Twilio-specific error metadata if present."""
+    fields: dict[str, Any] = {}
+    for attr in ("code", "status", "msg", "message", "more_info", "details", "method", "url"):
+        value = getattr(error, attr, None)
+        if value is not None:
+            fields[f"twilio_{attr}"] = value
+    return fields
+
+
+def extract_deepgram_error_metadata(error: Any) -> dict[str, Any]:
+    """Extract Deepgram-specific error metadata if present."""
+    fields: dict[str, Any] = {}
+    if isinstance(error, dict):
+        source = error
+        for key in ("status", "code", "type", "error", "message", "reason", "request_id", "requestId"):
+            if key in source and source[key] is not None:
+                normalized_key = key.replace("requestId", "request_id")
+                fields[f"deepgram_{normalized_key}"] = source[key]
+        return fields
+
+    for attr in ("status", "code", "type", "error", "message", "reason", "request_id", "requestId"):
+        value = getattr(error, attr, None)
+        if value is not None:
+            normalized_attr = attr.replace("requestId", "request_id")
+            fields[f"deepgram_{normalized_attr}"] = value
+    return fields
 
 
 def get_user_friendly_error_message(error: Exception | str, error_category: str = '') -> str:

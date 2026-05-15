@@ -405,7 +405,7 @@ class TestDeepgramASRProviderErrorHandling:
             await provider._on_connection_error(mock_error)
         
         assert provider._is_connected is False
-        assert "Error de conexión Deepgram" in caplog.text
+        assert "Provider connection error" in caplog.text
 
     @pytest.mark.asyncio
     async def test_transcript_handler_gracefully_handles_missing_data(

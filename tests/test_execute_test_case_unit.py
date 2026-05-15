@@ -5,12 +5,12 @@ import pytest
 from datetime import datetime, timezone
 from decimal import Decimal
 from time import time
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 from src.application.use_cases import execute_test_case_use_case as execute_module
 from src.application.services import ivr_state_machine as state_machine_module
-from src.application.exceptions import NotFoundError
+from src.application.exceptions import NotFoundError, ExternalDependencyError
 
 from src.application.use_cases.execute_test_case_use_case import ExecuteTestCaseUseCase
 from src.domain.entities.execution_log import ExecutionLogEntity
@@ -79,7 +79,7 @@ def use_case(
     mock_event_hub,
 ):
     """Create use case with mocked dependencies."""
-    return ExecuteTestCaseUseCase(
+    uc = ExecuteTestCaseUseCase(
         test_case_repo=mock_test_case_repo,
         test_execution_repo=mock_test_execution_repo,
         execution_log_repo=mock_execution_log_repo,
@@ -88,10 +88,100 @@ def use_case(
         call_session_store=mock_call_session_store,
         event_hub=mock_event_hub,
     )
+    # Bypass network check for all unit tests by default
+    uc._check_network_preflight = AsyncMock()
+    return uc
 
 
 class TestExecuteTestCaseUseCase:
     """Test cases for ExecuteTestCaseUseCase."""
+
+    @pytest.mark.asyncio
+    async def test_execute_preflight_network_failure(self, mock_test_case_repo, mock_test_execution_repo, mock_execution_log_repo, mock_call_provider, mock_asr_provider, mock_call_session_store, mock_event_hub):
+        """Prueba que execute lance ExternalDependencyError si falla la resolución DNS."""
+        uc = ExecuteTestCaseUseCase(
+            test_case_repo=mock_test_case_repo,
+            test_execution_repo=mock_test_execution_repo,
+            execution_log_repo=mock_execution_log_repo,
+            call_provider=mock_call_provider,
+            asr_provider=mock_asr_provider,
+            call_session_store=mock_call_session_store,
+            event_hub=mock_event_hub,
+        )
+        test_case_id = uuid4()
+        with patch("asyncio.get_running_loop") as mock_get_running_loop:
+            mock_loop = MagicMock()
+            import socket
+            # Simulate DNS resolution failure for api.deepgram.com
+            mock_loop.getaddrinfo = AsyncMock(side_effect=socket.gaierror(11001, "getaddrinfo failed"))
+            mock_get_running_loop.return_value = mock_loop
+
+            with pytest.raises(ExternalDependencyError) as exc_info:
+                await uc.execute(
+                    test_case_id=test_case_id,
+                    phone_number="+1234567890",
+                    webhook_url="https://webhook.com",
+                )
+            
+            assert "Error de red" in str(exc_info.value)
+            assert "api.deepgram.com" in str(exc_info.value)
+            assert mock_loop.getaddrinfo.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_execute_preflight_network_retry_success(
+        self,
+        mock_test_case_repo,
+        mock_test_execution_repo,
+        mock_execution_log_repo,
+        mock_call_provider,
+        mock_asr_provider,
+        mock_call_session_store,
+        mock_event_hub,
+    ):
+        """Prueba que el preflight reintente y continúe si la resolución se recupera."""
+        uc = ExecuteTestCaseUseCase(
+            test_case_repo=mock_test_case_repo,
+            test_execution_repo=mock_test_execution_repo,
+            execution_log_repo=mock_execution_log_repo,
+            call_provider=mock_call_provider,
+            asr_provider=mock_asr_provider,
+            call_session_store=mock_call_session_store,
+            event_hub=mock_event_hub,
+        )
+        test_case_id = uuid4()
+        with patch("asyncio.get_running_loop") as mock_get_running_loop:
+            mock_loop = MagicMock()
+            import socket
+            # Fail once for api.deepgram.com, then succeed for deepgram and twilio.
+            mock_loop.getaddrinfo = AsyncMock(
+                side_effect=[socket.gaierror(11001, "getaddrinfo failed"), None, None]
+            )
+            mock_get_running_loop.return_value = mock_loop
+
+            # Minimal setup to allow execute() to proceed
+            mock_test_case_repo.get_by_id.return_value = TestCaseEntity(
+                id=test_case_id,
+                ivr_architecture_id=uuid4(),
+                name="Test Case",
+                flow_script=[{"step": 1, "listen": "Bienvenido", "action": None}],
+                created_at=datetime.now(timezone.utc),
+            )
+            mock_test_execution_repo.create.return_value = TestExecutionEntity(
+                id=uuid4(),
+                test_case_id=test_case_id,
+                status="RUNNING",
+                duration_seconds=None,
+                provider_call_sid=None,
+                executed_at=datetime.now(timezone.utc),
+            )
+
+            await uc.execute(
+                test_case_id=test_case_id,
+                phone_number="+1234567890",
+                webhook_url="https://webhook.com",
+            )
+
+            assert mock_loop.getaddrinfo.await_count == 3
 
     @pytest.mark.asyncio
     async def test_execute_happy_path(
@@ -958,10 +1048,12 @@ class TestExecuteTestCaseCriticalFlowHelpers:
 
         await use_case._record_step_failure(
             execution_id=execution_id,
+            call_sid="CA123",
             step_number=2,
             expected_text="marque uno",
             actual_text="marque dos",
             reason="Failed text match",
+            reason_code="text_mismatch",
             confidence=Decimal("64.00"),
             execution_log_repo=mock_execution_log_repo,
         )
@@ -981,10 +1073,12 @@ class TestExecuteTestCaseCriticalFlowHelpers:
 
         await use_case._record_step_failure(
             execution_id=uuid4(),
+            call_sid="CA456",
             step_number=4,
             expected_text="opcion cuatro",
             actual_text=None,
             reason="Timeout",
+            reason_code="step_timeout",
             confidence=Decimal("0.00"),
             execution_log_repo=mock_execution_log_repo,
         )

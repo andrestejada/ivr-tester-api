@@ -16,3 +16,8 @@ class ForbiddenError(ApplicationException):
 
 class BusinessValidationError(ApplicationException):
     pass
+
+
+class ExternalDependencyError(ApplicationException):
+    """Excepción lanzada cuando hay un error conectando o resolviendo un proveedor externo"""
+    pass

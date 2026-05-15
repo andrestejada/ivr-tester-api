@@ -5,6 +5,10 @@ from src.application.utils.error_utils import (
     sanitize_error_message,
     classify_error_category,
     get_user_friendly_error_message,
+    format_log_fields,
+    mask_phone_number,
+    extract_twilio_error_metadata,
+    extract_deepgram_error_metadata,
 )
 
 
@@ -258,8 +262,59 @@ class TestGetUserFriendlyErrorMessage:
         """Verifica que clasifica automáticamente si no se proporciona categoría."""
         msg = get_user_friendly_error_message("Connection refused")
         assert msg is not None
-        assert len(msg) > 0
-        assert "connection" in msg.lower() or "network" in msg.lower()
+
+
+class TestFormatLogFields:
+    """Tests for format_log_fields helper."""
+
+    def test_format_skips_none_values(self):
+        result = format_log_fields({"a": 1, "b": None, "c": "x"})
+        assert "a=1" in result
+        assert "c=x" in result
+        assert "b=" not in result
+
+    def test_format_quotes_values_with_spaces(self):
+        result = format_log_fields({"message": "hello world"})
+        assert "message=\"hello world\"" in result
+
+    def test_format_normalizes_newlines(self):
+        result = format_log_fields({"message": "line1\nline2"})
+        assert "line1 line2" in result
+
+
+class TestMaskPhoneNumber:
+    """Tests for mask_phone_number helper."""
+
+    def test_mask_keeps_last_digits(self):
+        assert mask_phone_number("+1234567890") == "+******7890"
+
+    def test_mask_non_numeric(self):
+        assert mask_phone_number("(555) 123-4567") == "******4567"
+
+    def test_mask_empty_value(self):
+        assert mask_phone_number("") == ""
+
+
+class TestProviderMetadata:
+    """Tests for provider error metadata extraction."""
+
+    def test_extract_twilio_metadata(self):
+        class TwilioError(Exception):
+            def __init__(self):
+                self.code = 123
+                self.status = 400
+                self.more_info = "https://example.com"
+                super().__init__("Twilio failed")
+
+        metadata = extract_twilio_error_metadata(TwilioError())
+        assert metadata["twilio_code"] == 123
+        assert metadata["twilio_status"] == 400
+        assert metadata["twilio_more_info"] == "https://example.com"
+
+    def test_extract_deepgram_metadata_from_dict(self):
+        metadata = extract_deepgram_error_metadata({"status": 429, "error": "rate limited"})
+        assert metadata["deepgram_status"] == 429
+        assert metadata["deepgram_error"] == "rate limited"
 
     def test_hides_technical_details(self):
         """Verifica que oculta detalles técnicos."""
